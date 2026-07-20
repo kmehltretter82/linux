@@ -4744,6 +4744,16 @@ out_remove_drives:
 		}
 	}
 out_release_dma:
+	/*
+	 * The FDC probing above went through user_reset_fdc(), which ends
+	 * in process_fd_request() and so leaves a request-processing work
+	 * item queued on floppy_wq. Let it run while the driver's
+	 * resources are still valid: otherwise the destroy_workqueue()
+	 * below drains it only after the IRQ, DMA channel and I/O regions
+	 * have been released, and redo_fd_request() ends up touching a
+	 * driver that has already been torn down.
+	 */
+	flush_workqueue(floppy_wq);
 	if (atomic_read(&usage_count))
 		floppy_release_irq_and_dma();
 out_unreg_driver:
