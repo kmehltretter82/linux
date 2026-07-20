@@ -262,11 +262,36 @@ int __init dc21285_setup(int nr, struct pci_sys_data *sys)
 {
 	struct resource *res;
 
-	res = kzalloc_objs(struct resource, 2);
+	res = kzalloc_objs(struct resource, 3);
 	if (!res) {
 		printk("out of memory for root bus resources");
 		return 0;
 	}
+
+	/*
+	 * The 21285 decodes the whole 64K of PCI I/O space, so describe
+	 * that as the root bus I/O window instead of letting the generic
+	 * code synthesise one starting at PCIBIOS_MIN_IO. Devices with
+	 * fixed legacy I/O BARs below PCIBIOS_MIN_IO - the SL82C105 IDE
+	 * function of the NetWinder's W83C553 is one - can otherwise
+	 * never be claimed, and their drivers fail to probe with
+	 * "BAR 0 [io 0x01f0-0x01f7]: not claimed; can't enable device".
+	 *
+	 * PCIBIOS_MIN_IO still applies when *allocating* BARs (see
+	 * pci_assign_resource()), so this does not hand the ISA range
+	 * out to dynamically assigned devices. Use insert_resource()
+	 * rather than request_resource() because platform ISA devices
+	 * (the 8259 pair) have already claimed parts of this range.
+	 */
+	res[2].flags = IORESOURCE_IO;
+	res[2].name  = "Footbridge I/O";
+	res[2].start = 0;
+	res[2].end   = 0xffff;
+	if (insert_resource(&ioport_resource, &res[2]))
+		printk(KERN_ERR "PCI: unable to insert I/O window\n");
+	else
+		pci_add_resource_offset(&sys->resources, &res[2],
+					sys->io_offset);
 
 	res[0].flags = IORESOURCE_MEM;
 	res[0].name  = "Footbridge non-prefetch";
