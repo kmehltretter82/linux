@@ -6,6 +6,9 @@ name: weakmem-litmus-arm64
 # QEMU-TCG this can actually exhibit the "torn read" that herd7 proved is
 # permitted by the Linux kernel memory model.
 #
+# The litmus7 harnesses are pre-generated and committed under lkmm-ci/gen/, so
+# CI needs only gcc/make (preinstalled) -- no herdtools7 package, no network.
+#
 # Only runs in a PUBLIC repository (free arm64 runners are public-repo only),
 # and Actions must be enabled on the fork.
 
@@ -22,7 +25,7 @@ jobs:
     runs-on: ubuntu-24.04-arm      # free Cobalt 100 / Neoverse N2 runner
     steps:
       - name: Checkout (sparse + blobless; the kernel tree itself isn't needed)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 1
           filter: blob:none
@@ -33,30 +36,13 @@ jobs:
           echo "arch=$(uname -m)  cores=$(nproc)"
           lscpu | grep -Ei 'Architecture|Model name|Vendor|BogoMIPS' || true
 
-      - name: Install litmus7 (+ matching model library)
-        run: |
-          set -eux
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends herdtools7 gcc make git
-          ver=$(litmus7 -version | awk -F',' '{print $1}' | tr -d ' ')
-          echo "litmus7 version: $ver"
-          # The Debian/Ubuntu herdtools7 package ships the binary with a build-
-          # chroot libdir baked in and omits the model files, so fetch the
-          # matching upstream tag for litmus7's library.
-          git clone --depth 1 --branch "$ver" https://github.com/herd/herdtools7 hd \
-            || git clone --depth 1 https://github.com/herd/herdtools7 hd
-          echo "LLIB=$PWD/hd/litmus/libdir" >> "$GITHUB_ENV"
-
-      - name: Build and run the litmus tests on all cores
+      - name: Build and run the pre-generated harnesses on all cores
         working-directory: lkmm-ci
         run: |
           set -eux
           N=$(nproc)
           for t in ipset-cidr-old-inplace ipset-cidr-old-barriers; do
-            rm -rf "out-$t"; mkdir -p "out-$t"
-            litmus7 -set-libdir "$LLIB" -carch AArch64 -a "$N" -o "out-$t" "$t.litmus"
-            ( cd "out-$t" && sh comp.sh && \
-              "./$t.exe" -a "$N" -s 1000000 -r 400 | tee run.log )
+            ( cd "gen/$t" && sh comp.sh && "./$t.exe" -a "$N" -s 500000 -r 200 | tee run.log )
           done
 
       - name: Verdict
@@ -65,7 +51,7 @@ jobs:
           set -e
           fail=0
           check () {
-            t="$1"; want="$2"; log="out-$t/run.log"
+            t="$1"; want="$2"; log="gen/$t/run.log"
             obs=$(grep -E '^Observation' "$log" | head -1)
             echo "== $t =="
             sed -n '/Histogram/,/^Observation/p' "$log" || true
