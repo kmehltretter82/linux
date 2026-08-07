@@ -1,0 +1,34 @@
+name: arm64-recon
+
+# One-shot capability probe of the free GitHub arm64 runner (Azure Cobalt 100 /
+# Neoverse N2). Surfaces the facts that decide which arm64 bug-hunts are
+# feasible here (features, KVM, disk, toolchains) as ::notice:: annotations so
+# they can be read back over the public API without downloading logs.
+
+on:
+  push:
+    branches: [ weakmem-litmus-ci ]
+    paths: [ '.github/workflows/arm64-recon.yml' ]
+  workflow_dispatch:
+
+jobs:
+  recon:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Probe Neoverse N2 runner capabilities
+        run: |
+          note() { printf '::notice title=%s::%s\n' "$1" "$2"; }
+          note kernel   "$(uname -rmo)"
+          note capacity "nproc=$(nproc) ram=$(free -h | awk '/Mem:/{print $2}') disk=$(df -h / | awk 'NR==2{print $4" free"}')"
+          note cpu      "$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2); print $2; exit}')"
+          note midr     "$(cat /sys/devices/system/cpu/cpu0/regs/identification/midr_el1 2>/dev/null || echo NA)"
+          note hwcaps   "$(awk -F: '/^Features/{print $2; exit}' /proc/cpuinfo | cut -c1-400)"
+          note sve_vl   "$(cat /proc/sys/abi/sve_default_vector_length 2>/dev/null || echo none)"
+          note kvm      "$([ -e /dev/kvm ] && echo present || echo absent)"
+          note lockdown "$(cat /sys/kernel/security/lockdown 2>/dev/null || echo NA)"
+          note gcc      "$(gcc -dumpversion 2>/dev/null || echo none)"
+          note clang    "$(clang --version 2>/dev/null | awk 'NR==1{print $NF; exit}' || echo none)"
+          note qemu     "$(command -v qemu-system-aarch64 >/dev/null 2>&1 && qemu-system-aarch64 --version | head -1 || echo not-installed)"
+          echo '===== lscpu ====='; lscpu || true
+          echo '===== cpuinfo Features ====='; grep -m1 Features /proc/cpuinfo || true
+          echo '===== /proc/sys/abi ====='; ls -l /proc/sys/abi 2>/dev/null || true
