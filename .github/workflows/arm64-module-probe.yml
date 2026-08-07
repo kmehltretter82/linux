@@ -1,0 +1,53 @@
+name: arm64-module-probe
+
+# Decisive test: can we build and insmod an out-of-tree kernel module on the
+# runner? lockdown is off, so if the azure kernel's headers are installable and
+# unsigned modules are allowed, we can run our own kernel-level code (e.g. a
+# klitmus7 litmus module) on the REAL Neoverse N2 -- real weak memory at kernel
+# privilege, which QEMU-TCG cannot give. Results surfaced as ::notice::.
+
+on:
+  push:
+    branches: [ weakmem-litmus-ci ]
+    paths: [ '.github/workflows/arm64-module-probe.yml' ]
+  workflow_dispatch:
+
+jobs:
+  modprobe:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Build + load a trivial out-of-tree module
+        run: |
+          note() { printf '::notice title=%s::%s\n' "$1" "$2"; }
+          set +e
+          KREL=$(uname -r)
+          note kernel "$KREL sig_enforce=$(cat /sys/module/module/parameters/sig_enforce 2>/dev/null || echo NA)"
+          if [ ! -d "/lib/modules/$KREL/build" ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends "linux-headers-$KREL" build-essential >/tmp/apt.log 2>&1
+          fi
+          hdr=no; [ -d "/lib/modules/$KREL/build" ] && hdr=yes
+          note headers "build-dir present=$hdr"
+          if [ "$hdr" != yes ]; then note result "NO headers -> cannot build a module (tail: $(tail -1 /tmp/apt.log 2>/dev/null))"; exit 0; fi
+          mkdir -p /tmp/mod && cd /tmp/mod
+          cat > hello.c <<'EOF'
+          #include <linux/module.h>
+          #include <linux/kernel.h>
+          static int __init h(void) { pr_info("n2probe: loaded\n"); return 0; }
+          static void __exit b(void) { pr_info("n2probe: unloaded\n"); }
+          module_init(h);
+          module_exit(b);
+          MODULE_LICENSE("GPL");
+          EOF
+          echo 'obj-m += hello.o' > Makefile
+          make -C "/lib/modules/$KREL/build" M=/tmp/mod modules >/tmp/build.log 2>&1
+          built=no; [ -f hello.ko ] && built=yes
+          note build "module built=$built"
+          if [ "$built" != yes ]; then note buildlog "$(tail -2 /tmp/build.log)"; exit 0; fi
+          sudo insmod hello.ko 2>/tmp/insmod.log
+          if [ $? -eq 0 ]; then
+            note insmod "SUCCESS -- own kernel-level code runs on real N2 (klitmus feasible)"
+            sudo rmmod hello 2>/dev/null
+          else
+            note insmod "FAILED: $(tr '\n' ' ' </tmp/insmod.log)"
+          fi
