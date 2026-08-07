@@ -1,0 +1,35 @@
+C ipset-cidr-new-rcu
+
+(*
+ * Distilled model of the NEW netfilter ipset cidr bookkeeping.
+ *
+ * The writer builds a fresh net_prefixes structure, initialises its
+ * count, and publishes it with rcu_assign_pointer(h->rnets[n], tmp).
+ * The reader takes rcu_read_lock(), rcu_dereference()s the pointer and
+ * reads the count through it. The address dependency plus release/
+ * acquire forbids observing the new pointer with a stale count: the
+ * reader sees either the fully-initialised old or new structure.
+ *
+ * Result: Never
+ *)
+
+{ rnets=oldp; }
+
+P0(int *newp, int **rnets)
+{
+	WRITE_ONCE(*newp, 1);
+	rcu_assign_pointer(*rnets, newp);
+}
+
+P1(int **rnets)
+{
+	int *r0;
+	int r1;
+
+	rcu_read_lock();
+	r0 = rcu_dereference(*rnets);
+	r1 = READ_ONCE(*r0);
+	rcu_read_unlock();
+}
+
+exists (1:r0=newp /\ 1:r1=0)

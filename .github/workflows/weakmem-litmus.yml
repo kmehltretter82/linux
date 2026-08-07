@@ -1,0 +1,90 @@
+name: weakmem-litmus-arm64
+
+# Runs the ipset cidr weak-memory litmus tests on a FREE GitHub-hosted arm64
+# runner. Those runners are 4-vCPU Azure Cobalt 100 VMs (Arm Neoverse N2,
+# ARMv9.0-A) -- real Arm silicon, so they genuinely reorder memory. Unlike
+# QEMU-TCG this can actually exhibit the "torn read" that herd7 proved is
+# permitted by the Linux kernel memory model.
+#
+# Only runs in a PUBLIC repository (free arm64 runners are public-repo only),
+# and Actions must be enabled on the fork.
+
+on:
+  push:
+    branches: [ weakmem-litmus-ci ]
+    paths:
+      - 'lkmm-ci/**'
+      - '.github/workflows/weakmem-litmus.yml'
+  workflow_dispatch:
+
+jobs:
+  litmus:
+    runs-on: ubuntu-24.04-arm      # free Cobalt 100 / Neoverse N2 runner
+    steps:
+      - name: Checkout (sparse + blobless; the kernel tree itself isn't needed)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: lkmm-ci
+
+      - name: Confirm we are on real Arm silicon
+        run: |
+          echo "arch=$(uname -m)  cores=$(nproc)"
+          lscpu | grep -Ei 'Architecture|Model name|Vendor|BogoMIPS' || true
+
+      - name: Install litmus7 (+ matching model library)
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends herdtools7 gcc make git
+          ver=$(litmus7 -version | awk -F',' '{print $1}' | tr -d ' ')
+          echo "litmus7 version: $ver"
+          # The Debian/Ubuntu herdtools7 package ships the binary with a build-
+          # chroot libdir baked in and omits the model files, so fetch the
+          # matching upstream tag for litmus7's library.
+          git clone --depth 1 --branch "$ver" https://github.com/herd/herdtools7 hd \
+            || git clone --depth 1 https://github.com/herd/herdtools7 hd
+          echo "LLIB=$PWD/hd/litmus/libdir" >> "$GITHUB_ENV"
+
+      - name: Build and run the litmus tests on all cores
+        working-directory: lkmm-ci
+        run: |
+          set -eux
+          N=$(nproc)
+          for t in ipset-cidr-old-inplace ipset-cidr-old-barriers; do
+            rm -rf "out-$t"; mkdir -p "out-$t"
+            litmus7 -set-libdir "$LLIB" -carch AArch64 -a "$N" -o "out-$t" "$t.litmus"
+            ( cd "out-$t" && sh comp.sh && \
+              "./$t.exe" -a "$N" -s 1000000 -r 400 | tee run.log )
+          done
+
+      - name: Verdict
+        working-directory: lkmm-ci
+        run: |
+          set -e
+          fail=0
+          check () {
+            t="$1"; want="$2"; log="out-$t/run.log"
+            obs=$(grep -E '^Observation' "$log" | head -1)
+            echo "== $t =="
+            sed -n '/Histogram/,/^Observation/p' "$log" || true
+            echo "$obs"
+            got=$(echo "$obs" | grep -oE 'Sometimes|Always|Never' | head -1)
+            if [ "$want" = "seen" ]; then
+              if [ "$got" = "Sometimes" ] || [ "$got" = "Always" ]; then
+                echo "::notice title=$t::REAL torn read observed on Neoverse N2 ($got) -- weak-memory bug confirmed on hardware."
+              else
+                echo "::warning title=$t::not observed this run (probabilistic); raise -r/-s and retry."
+              fi
+            else
+              if [ "$got" = "Never" ]; then
+                echo "::notice title=$t::clean ($got) -- the ordering fix holds on hardware."
+              else
+                echo "::error title=$t::expected Never but saw $got"; fail=1
+              fi
+            fi
+          }
+          check ipset-cidr-old-inplace seen
+          check ipset-cidr-old-barriers never
+          exit $fail

@@ -1,0 +1,32 @@
+C ipset-cidr-old-barriers
+
+(*
+ * The same in-place scheme but with the ordering that was missing:
+ * smp_wmb() between the count and the marker on the writer, smp_rmb()
+ * between the marker and the count on the reader. This is the minimal
+ * barrier-only fix, as opposed to the full RCU rework, and shows the
+ * bug is specifically the absence of ordering, not the layout.
+ *
+ * Result: Never
+ *)
+
+{ }
+
+P0(int *cidr, int *count)
+{
+	WRITE_ONCE(*count, 1);
+	smp_wmb();
+	WRITE_ONCE(*cidr, 1);
+}
+
+P1(int *cidr, int *count)
+{
+	int r0;
+	int r1;
+
+	r0 = READ_ONCE(*cidr);
+	smp_rmb();
+	r1 = READ_ONCE(*count);
+}
+
+exists (1:r0=1 /\ 1:r1=0)

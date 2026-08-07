@@ -1,0 +1,36 @@
+C ipset-cidr-old-inplace
+
+(*
+ * Distilled model of the OLD netfilter ipset cidr bookkeeping.
+ *
+ * The writer (mtype_add_cidr) updates a prefix entry in place under
+ * set->lock: it stores the per-prefix element count and the "cidr"
+ * value that the lockless test path uses as the valid-entry marker.
+ * The reader (mtype_test_cidrs) walks the array with NO lock and NO
+ * barrier, keying its loop on cidr != 0 and then using the count.
+ *
+ * With plain (ONCE) accesses and no ordering, a weakly-ordered CPU may
+ * let the reader observe the cidr marker before the count store, i.e. a
+ * half-initialised prefix entry. This is what sashiko flagged.
+ *
+ * Result: Sometimes
+ *)
+
+{ }
+
+P0(int *cidr, int *count)
+{
+	WRITE_ONCE(*count, 1);
+	WRITE_ONCE(*cidr, 1);
+}
+
+P1(int *cidr, int *count)
+{
+	int r0;
+	int r1;
+
+	r0 = READ_ONCE(*cidr);
+	r1 = READ_ONCE(*count);
+}
+
+exists (1:r0=1 /\ 1:r1=0)
