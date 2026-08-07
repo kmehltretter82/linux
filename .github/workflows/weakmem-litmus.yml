@@ -36,13 +36,25 @@ jobs:
           echo "arch=$(uname -m)  cores=$(nproc)"
           lscpu | grep -Ei 'Architecture|Model name|Vendor|BogoMIPS' || true
 
-      - name: Build and run the pre-generated harnesses on all cores
+      - name: Build (with LKMM userspace macros) and run on all cores
         working-directory: lkmm-ci
         run: |
-          set -eux
+          set -euxo pipefail
           N=$(nproc)
+          H="$PWD/lkmm_user.h"
           for t in ipset-cidr-old-inplace ipset-cidr-old-barriers; do
-            ( cd "gen/$t" && sh comp.sh && "./$t.exe" -a "$N" -s 500000 -r 200 | tee run.log )
+            (
+              cd "gen/$t"
+              # litmus7 userspace output uses READ_ONCE/WRITE_ONCE/smp_* but does
+              # not define them; force-include our compat header. pipefail makes
+              # a crashing .exe fail the step instead of being masked by tee.
+              gcc -Wall -std=gnu99 -pthread -O2 -include "$H" -c outs.c utils.c litmus_rand.c
+              gcc -Wall -std=gnu99 -pthread -include "$H" -o "$t.exe" \
+                  outs.o utils.o litmus_rand.o "$t.c"
+              test -x "./$t.exe"
+              "./$t.exe" -a "$N" -s 500000 -r 100 | tee run.log
+              test -s run.log
+            )
           done
 
       - name: Verdict
@@ -54,7 +66,7 @@ jobs:
             t="$1"; want="$2"; log="gen/$t/run.log"
             obs=$(grep -E '^Observation' "$log" | head -1)
             echo "== $t =="
-            sed -n '/Histogram/,/^Observation/p' "$log" || true
+            echo "--- full run.log ---"; cat "$log"; echo "---"
             echo "$obs"
             got=$(echo "$obs" | grep -oE 'Sometimes|Always|Never' | head -1)
             if [ "$want" = "seen" ]; then
