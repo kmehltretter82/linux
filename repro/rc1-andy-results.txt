@@ -1,0 +1,33 @@
+RISC-V Vector warning A/B results
+=================================
+
+The clean v7.2-rc1 tree was dc59e4fea9d8 (tag v7.2-rc1).  The build used
+CONFIG_PREEMPT_LAZY=y, CONFIG_RISCV_ISA_V_PREEMPTIVE=y, and CONFIG_KCOV=y.
+
+The standalone byte-check workload used one vCPU and QEMU TCG with
+-icount shift=7:
+
+                         Vector warnings   byte-check
+clean v7.2-rc1                 22             failures=0
+Andy v5 patch 1 only            0             failures=0
+
+The clean rc1 source was restored after the patch-1 build.  The patch-1
+test applies only the switch-out hunk from Andy's v5 series:
+
+  if (!(current->thread.riscv_v_flags & RISCV_V_CTX_DEPTH_MASK)) {
+          riscv_v_disable();
+          prev->thread.riscv_v_flags |= RISCV_PREEMPT_V_IN_SCHEDULE;
+  }
+
+Normal-timing stress on clean rc1 also completed with failures=0 and no
+warning.
+
+Bounded syzkaller runs used normal QEMU timing, one VM, two vCPUs, and
+procs=4.  Each ran for 10 minutes and stopped by timeout:
+
+                         executions   corpus   coverage   warning
+clean v7.2-rc1              6,285       171      24,003       no
+Andy v5 patch 1 only        6,645       183      23,621       no
+
+The complete Andy v5 series was not applied here because the mboxes are
+based on an unmerged prerequisite stack; patch 1 was tested in isolation.
