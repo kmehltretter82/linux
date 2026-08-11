@@ -1,0 +1,15 @@
+QEMU emulator version 10.2.1 (Debian 1:10.2.1+ds-1ubuntu3.1)
+qemu-system-riscv64 ["-m" "2048" "-smp" "2" "-chardev" "socket,id=SOCKSYZ,server=on,wait=off,host=localhost,port=5611" "-mon" "chardev=SOCKSYZ,mode=control" "-display" "none" "-serial" "stdio" "-no-reboot" "-name" "VM-0" "-device" "virtio-rng-pci" "-machine" "virt" "-cpu" "max" "-device" "virtio-net-pci,netdev=net0" "-netdev" "user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:21738-:22" "-device" "virtio-blk-device,drive=hd0" "-drive" "file=/home/karl/linux-work/kcov/exact-matrix/riscv64-syz.cpio.gz,if=none,format=raw,id=hd0" "-snapshot" "-initrd" "/home/karl/linux-work/kcov/exact-matrix/riscv64-syz.cpio.gz" "-kernel" "/home/karl/linux-work/kcov/riscv-procs4-unfixed-kobj/arch/riscv/boot/Image" "-append" "root=/dev/vda console=ttyS0 console=ttyS0 earlycon=sbi panic=-1"]
+
+[CPU Info]
+processor           : 0, 1
+hart                : 0, 1
+isa                 : rv64imafdcvh_zicbom_zicbop_zicboz_ziccrse_zicfilp_zicfiss_zicntr_zicond_zicsr_zifencei_zihintntl_zihintpause_zihpm_zimop_zaamo_zabha_zacas_zalrsc_zawrs_zfa_zfbfmin_zfh_zfhmin_zca_zcb_zcd_zcmop_zba_zbb_zbc_zbkb_zbkc_zbkx_zbs_zknd_zkne_zknh_zkr_zkt_zksed_zksh_ztso_zvbb_zvbc_zve32f_zve32x_zve64d_zve64f_zve64x_zvfbfmin_zvfbfwma_zvfh_zvfhmin_zvkb_zvkg_zvkned_zvknha_zvknhb_zvksed_zvksh_zvkt_smaia_smmpm_smnpm_smstateen_ssaia_sscofpmf_ssnpm_sstc_svadu_svinval_svnapot_svpbmt_svrsw60t59b_svvptc
+mmu                 : sv57
+mvendorid           : 0x0
+marchid             : 0x0
+mimpid              : 0x0
+hart isa            : rv64imafdcvh_zicbom_zicbop_zicboz_ziccrse_zicfilp_zicfiss_zicntr_zicond_zicsr_zifencei_zihintntl_zihintpause_zihpm_zimop_zaamo_zabha_zacas_zalrsc_zawrs_zfa_zfbfmin_zfh_zfhmin_zca_zcb_zcd_zcmop_zba_zbb_zbc_zbkb_zbkc_zbkx_zbs_zknd_zkne_zknh_zkr_zkt_zksed_zksh_ztso_zvbb_zvbc_zve32f_zve32x_zve64d_zve64f_zve64x_zvfbfmin_zvfbfwma_zvfh_zvfhmin_zvkb_zvkg_zvkned_zvknha_zvknhb_zvksed_zvksh_zvkt_smaia_smmpm_smnpm_smstateen_ssaia_sscofpmf_ssnpm_sstc_svadu_svinval_svnapot_svpbmt_svrsw60t59b_svvptc
+
+--------------------------------------------------------------------------------
+

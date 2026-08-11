@@ -1,0 +1,53 @@
+EXT4-fs (loop6): The kernel was not built with CONFIG_QUOTA and CONFIG_QFMT_V2
+EXT4-fs (loop1): The kernel was not built with CONFIG_QUOTA and CONFIG_QFMT_V2
+EXT4-fs (loop5): unmounting filesystem 00000000-0000-0000-0000-000000000000.
+------------[ cut here ]------------
+WARNING: arch/riscv/include/asm/vector.h:376 at __schedule+0xfbc/0x10b4 core.c:-1, CPU#1: dropbear/80
+Modules linked in:
+CPU: 1 UID: 0 PID: 80 Comm: dropbear Not tainted 7.2.0-rc5-00306-gdb03c02b8fcc #1 PREEMPTLAZY 
+Hardware name: riscv-virtio,qemu (DT)
+epc : __schedule+0xfbc/0x10b4 core.c:-1
+ ra : __schedule+0x746/0x10b4 core.c:-1
+epc : ffffffff810cb124 ra : ffffffff810ca8ae sp : ff20000000663610
+ gp : ffffffff8203b770 tp : ff600000026e4f80 t0 : 0000000000000000
+ t1 : 0000000000006000 t2 : 00000000012d0d14 s0 : ff200000006636c0
+ s1 : ff2000000c824000 a0 : ff60000004903358 a1 : ffffffff01456d80
+ a2 : 0000000000000b98 a3 : 0000000000001000 a4 : 0000000000000001
+ a5 : 0000000040010100 a6 : 0000000000000000 a7 : 0000000000000000
+ s2 : ff600000026e4f80 s3 : 0000000000004000 s4 : 0000000000000000
+ s5 : ff600000026e4f80 s6 : 0000000000000000 s7 : ffffffff82080628
+ s8 : 0000000040000000 s9 : 0000000000000000 s10: 0000000000000000
+ s11: ff600000049027c0 t3 : 00000000000017d2 t4 : 00000000dbfbb796
+ t5 : 00000000000003ac t6 : 0000000000009ff7 ssp : 0000000000000000
+status: 0000000200000500 badaddr: ffffffff810cb124 cause: 0000000000000003
+[<ffffffff810cb124>] __schedule+0xfbc/0x10b4 core.c:-1
+[<ffffffff810cb41c>] preempt_schedule_irq+0x2a/0x76
+[<ffffffff810c6a06>] irqentry_exit+0x260/0xd48
+[<ffffffff810c666a>] do_irq+0x34/0x48
+[<ffffffff810d4f82>] handle_exception+0x146/0x174
+[<ffffffff80026658>] kernel_vector_begin+0x268/0x44e
+[<ffffffff810c50cc>] enter_vector_usercopy+0x9e/0x166
+[<ffffffff80746a52>] _copy_from_iter+0x168/0xa1a
+[<ffffffff80ed1228>] tcp_sendmsg_locked+0xf80/0x1602
+[<ffffffff80ed18de>] tcp_sendmsg+0x34/0x4e
+[<ffffffff80f28786>] inet_sendmsg+0x3a/0x58
+[<ffffffff80d8a4b8>] __sock_sendmsg+0x5e/0x96 socket.c:-1
+[<ffffffff80d8a5ce>] sock_write_iter+0xde/0x158 socket.c:-1
+[<ffffffff8036cae8>] do_iter_readv_writev+0x2ba/0x38c read_write.c:-1
+[<ffffffff8036e570>] vfs_writev+0x14c/0x494 read_write.c:-1
+[<ffffffff8036e9b8>] do_writev+0x100/0x124 read_write.c:-1
+[<ffffffff8037099e>] __riscv_sys_writev+0x26/0x2e
+[<ffffffff8001fb2c>] syscall_handler+0x50/0x7a traps.c:-1
+[<ffffffff810c63ce>] do_trap_ecall_u+0x18c/0x2ac
+[<ffffffff810d4fa4>] handle_exception+0x168/0x174
+---[ end trace 0000000000000000 ]---
+EXT4-fs (loop1): mounted filesystem 00000000-0000-0000-0000-000000000000 r/w without journal. Quota mode: disabled.
+EXT4-fs (loop5): mounted filesystem 00000000-0000-0000-0000-000000000000 r/w without journal. Quota mode: disabled.
+EXT4-fs (loop6): The kernel was not built with CONFIG_QUOTA and CONFIG_QFMT_V2
+EXT4-fs (loop0): mounted filesystem 00000000-0000-0000-0000-000000000000 r/w without journal. Quota mode: disabled.
+EXT4-fs (loop5): unmounting filesystem 00000000-0000-0000-0000-000000000000.
+EXT4-fs (loop1): unmounting filesystem 00000000-0000-0000-0000-000000000000.
+EXT4-fs (loop0): unmounting filesystem 00000000-0000-0000-0000-000000000000.
+
+<<<<<<<<<<<<<<< tail report >>>>>>>>>>>>>>>
+
