@@ -93,18 +93,33 @@ static inline u16 __raw_readw(const volatile void __iomem *addr)
 }
 #endif
 
+/*
+ * A Thumb-2 load or store with an immediate offset only reaches down to
+ * -255, an ARM one to -4095.  gcc's "o" constraint checks the offset it
+ * folds into the operand against the ARM range in either mode, at least
+ * up to gcc 15, and a driver that reads two registers 0x100 apart in a
+ * loop gets an "ldr r0, [r3, #-256]" that the assembler rejects with
+ * "offset out of range".  So do not let it fold an offset at all when
+ * building for Thumb-2.
+ */
+#ifdef CONFIG_THUMB2_KERNEL
+#define __raw_io_operand(x)	"Q" (x)
+#else
+#define __raw_io_operand(x)	"Qo" (x)
+#endif
+
 #define __raw_writeb __raw_writeb
 static inline void __raw_writeb(u8 val, volatile void __iomem *addr)
 {
 	asm volatile("strb %1, %0"
-		     : : "Qo" (*(volatile u8 __force *)addr), "r" (val));
+		     : : __raw_io_operand(*(volatile u8 __force *)addr), "r" (val));
 }
 
 #define __raw_writel __raw_writel
 static inline void __raw_writel(u32 val, volatile void __iomem *addr)
 {
 	asm volatile("str %1, %0"
-		     : : "Qo" (*(volatile u32 __force *)addr), "r" (val));
+		     : : __raw_io_operand(*(volatile u32 __force *)addr), "r" (val));
 }
 
 #define __raw_readb __raw_readb
@@ -113,7 +128,7 @@ static inline u8 __raw_readb(const volatile void __iomem *addr)
 	u8 val;
 	asm volatile("ldrb %0, %1"
 		     : "=r" (val)
-		     : "Qo" (*(volatile u8 __force *)addr));
+		     : __raw_io_operand(*(volatile u8 __force *)addr));
 	return val;
 }
 
@@ -123,7 +138,7 @@ static inline u32 __raw_readl(const volatile void __iomem *addr)
 	u32 val;
 	asm volatile("ldr %0, %1"
 		     : "=r" (val)
-		     : "Qo" (*(volatile u32 __force *)addr));
+		     : __raw_io_operand(*(volatile u32 __force *)addr));
 	return val;
 }
 
