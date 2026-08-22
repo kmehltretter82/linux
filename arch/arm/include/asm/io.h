@@ -179,6 +179,15 @@ static inline void __iomem *__typesafe_io(unsigned long addr)
 #define __iowmb()		do { } while (0)
 #endif
 
+/*
+ * What the asm-generic accessors put around the access: the read barrier
+ * after a read and the write barrier before a write, nothing else.
+ */
+#define __io_br()
+#define __io_ar(v)		__iormb()
+#define __io_bw()		__iowmb()
+#define __io_aw()
+
 /* PCI fixed i/o mapping */
 #define PCI_IO_VIRT_BASE	0xfee00000
 #define PCI_IOBASE		((void __iomem *)PCI_IO_VIRT_BASE)
@@ -281,25 +290,11 @@ extern void _memset_io(volatile void __iomem *, int, size_t);
  * Again, these are defined to perform little endian accesses.  See the
  * IO port primitives for more information.
  */
-#ifndef readl
-#define readb_relaxed(c) ({ u8  __r = __raw_readb(c); __r; })
-#define readw_relaxed(c) ({ u16 __r = le16_to_cpu((__force __le16) \
-					__raw_readw(c)); __r; })
-#define readl_relaxed(c) ({ u32 __r = le32_to_cpu((__force __le32) \
-					__raw_readl(c)); __r; })
-
-#define writeb_relaxed(v,c)	__raw_writeb(v,c)
-#define writew_relaxed(v,c)	__raw_writew((__force u16) cpu_to_le16(v),c)
-#define writel_relaxed(v,c)	__raw_writel((__force u32) cpu_to_le32(v),c)
-
-#define readb(c)		({ u8  __v = readb_relaxed(c); __iormb(); __v; })
-#define readw(c)		({ u16 __v = readw_relaxed(c); __iormb(); __v; })
-#define readl(c)		({ u32 __v = readl_relaxed(c); __iormb(); __v; })
-
-#define writeb(v,c)		({ __iowmb(); writeb_relaxed(v,c); })
-#define writew(v,c)		({ __iowmb(); writew_relaxed(v,c); })
-#define writel(v,c)		({ __iowmb(); writel_relaxed(v,c); })
-
+/*
+ * readb/w/l(), writeb/w/l() and their _relaxed variants come from
+ * asm-generic/io.h, with the barriers supplied through __io_ar() and
+ * __io_bw() below.  That gives them the rwmmio tracepoints for free.
+ */
 #define readsb(p,d,l)		__raw_readsb(p,d,l)
 #define readsw(p,d,l)		__raw_readsw(p,d,l)
 #define readsl(p,d,l)		__raw_readsl(p,d,l)
@@ -338,8 +333,6 @@ static inline void memcpy_toio(volatile void __iomem *to, const void *from,
 #define memcpy_fromio(a,c,l)	_memcpy_fromio((a),c,(l))
 #define memcpy_toio(c,a,l)	_memcpy_toio(c,(a),(l))
 #endif
-
-#endif	/* readl */
 
 /*
  * ioremap() and friends.
