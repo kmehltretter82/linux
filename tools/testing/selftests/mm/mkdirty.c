@@ -83,6 +83,15 @@ static char *mmap_thp_range(int prot, char **_mmap_mem, size_t *_mmap_size)
 	return mem;
 }
 
+/*
+ * With CONFIG_PROC_MEM_FORCE_PTRACE or proc_mem.force_override=ptrace, a
+ * write through /proc/self/mem only gets FOLL_FORCE from an active ptracer,
+ * which a task cannot be for itself.  The write into a read-only mapping
+ * then fails with EIO, and there is nothing for these tests to check.
+ */
+static const char *no_force_msg =
+	"/proc/self/mem writes are not forced, need CONFIG_PROC_MEM_ALWAYS_FORCE";
+
 static void test_ptrace_write(void)
 {
 	char data = 1;
@@ -109,6 +118,10 @@ static void test_ptrace_write(void)
 	 */
 	lseek(mem_fd, (uintptr_t) mem, SEEK_SET);
 	ret = write(mem_fd, &data, 1);
+	if (ret == -1 && errno == EIO) {
+		ksft_test_result_skip("%s\n", no_force_msg);
+		goto munmap;
+	}
 	if (ret != 1 || *mem != data) {
 		ksft_test_result_fail("write() failed\n");
 		goto munmap;
@@ -139,6 +152,10 @@ static void test_ptrace_write_thp(void)
 	 */
 	lseek(mem_fd, (uintptr_t) mem, SEEK_SET);
 	ret = write(mem_fd, &data, 1);
+	if (ret == -1 && errno == EIO) {
+		ksft_test_result_skip("%s\n", no_force_msg);
+		goto munmap;
+	}
 	if (ret != 1 || *mem != data) {
 		ksft_test_result_fail("write() failed\n");
 		goto munmap;
