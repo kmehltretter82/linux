@@ -36,7 +36,8 @@ static bool range_in_range(unsigned long start, unsigned long size,
  * This function assumes that the range is mapped with PAGE_SIZE pages.
  */
 static int __change_memory_common(unsigned long start, unsigned long size,
-				pgprot_t set_mask, pgprot_t clear_mask)
+				pgprot_t set_mask, pgprot_t clear_mask,
+				bool local_tlb_flush)
 {
 	struct page_change_data data;
 	int ret;
@@ -47,7 +48,10 @@ static int __change_memory_common(unsigned long start, unsigned long size,
 	ret = apply_to_page_range(&init_mm, start, size, change_page_range,
 				  &data);
 
-	flush_tlb_kernel_range(start, start + size);
+	if (local_tlb_flush)
+		local_flush_tlb_kernel_range(start, start + size);
+	else
+		flush_tlb_kernel_range(start, start + size);
 	return ret;
 }
 
@@ -67,7 +71,7 @@ static int change_memory_common(unsigned long addr, int numpages,
 	    !range_in_range(start, size, VMALLOC_START, VMALLOC_END))
 		return -EINVAL;
 
-	return __change_memory_common(start, size, set_mask, clear_mask);
+	return __change_memory_common(start, size, set_mask, clear_mask, false);
 }
 
 int set_memory_ro(unsigned long addr, int numpages)
@@ -103,9 +107,46 @@ int set_memory_valid(unsigned long addr, int numpages, int enable)
 	if (enable)
 		return __change_memory_common(addr, PAGE_SIZE * numpages,
 					      __pgprot(L_PTE_VALID),
-					      __pgprot(0));
+					      __pgprot(0), false);
 	else
 		return __change_memory_common(addr, PAGE_SIZE * numpages,
 					      __pgprot(0),
-					      __pgprot(L_PTE_VALID));
+					      __pgprot(L_PTE_VALID), false);
 }
+
+#ifdef CONFIG_DEBUG_PAGEALLOC
+void __kernel_map_pages(struct page *page, int numpages, int enable)
+{
+	unsigned long addr;
+
+	if (PageHighMem(page))
+		return;
+
+	addr = (unsigned long)page_address(page);
+
+	/*
+	 * The kernel image is section mapped even with debug_pagealloc, see
+	 * debug_pagealloc_split_lowmem() in mmu.c, so pages freed out of it
+	 * cannot be unmapped.  A free block is order aligned and so never
+	 * straddles a section boundary into one, which makes checking the
+	 * first page enough.
+	 */
+	if (pmd_leaf(*pmd_off_k(addr)))
+		return;
+
+	/*
+	 * Only flush the local TLB, as x86 does.  This is called from the
+	 * page allocator, often with interrupts disabled, where the IPI an
+	 * SMP broadcast may need would deadlock.  A stale entry on another
+	 * CPU only means an access from there is caught a little later.
+	 */
+	if (enable)
+		__change_memory_common(addr, (unsigned long)numpages << PAGE_SHIFT,
+				       __pgprot(L_PTE_VALID), __pgprot(0),
+				       true);
+	else
+		__change_memory_common(addr, (unsigned long)numpages << PAGE_SHIFT,
+				       __pgprot(0), __pgprot(L_PTE_VALID),
+				       true);
+}
+#endif /* CONFIG_DEBUG_PAGEALLOC */
