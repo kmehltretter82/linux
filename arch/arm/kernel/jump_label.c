@@ -8,11 +8,12 @@ static void __arch_jump_label_transform(struct jump_entry *entry,
 					enum jump_label_type type,
 					bool is_static)
 {
-	void *addr = (void *)entry->code;
+	void *addr = (void *)jump_entry_code(entry);
 	unsigned int insn;
 
 	if (type == JUMP_LABEL_JMP)
-		insn = arm_gen_branch(entry->code, entry->target);
+		insn = arm_gen_branch(jump_entry_code(entry),
+				      jump_entry_target(entry));
 	else
 		insn = arm_gen_nop();
 
