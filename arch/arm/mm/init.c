@@ -35,6 +35,7 @@
 #include <asm/system_info.h>
 #include <asm/tlb.h>
 #include <asm/fixmap.h>
+#include <linux/ptdump.h>
 #include <asm/ptdump.h>
 
 #include <asm/mach/arch.h>
@@ -403,7 +404,7 @@ static int __mark_rodata_ro(void *unused)
 void mark_rodata_ro(void)
 {
 	stop_machine(__mark_rodata_ro, NULL, NULL);
-	arm_debug_checkwx();
+	debug_checkwx();
 }
 
 #else

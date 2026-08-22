@@ -11,6 +11,7 @@
 #include <linux/debugfs.h>
 #include <linux/fs.h>
 #include <linux/mm.h>
+#include <linux/ptdump.h>
 #include <linux/seq_file.h>
 
 #include <asm/domain.h>
@@ -46,6 +47,8 @@ static struct addr_marker address_markers[] = {
 })
 
 struct pg_state {
+	struct ptdump_state ptdump;
+	struct mm_struct *mm;
 	struct seq_file *seq;
 	const struct addr_marker *marker;
 	unsigned long start_address;
@@ -54,6 +57,8 @@ struct pg_state {
 	bool check_wx;
 	unsigned long wx_pages;
 	const char *current_domain;
+	/* Domain of the pmd whose page table is being walked. */
+	const char *pmd_domain;
 };
 
 struct prot_bits {
@@ -307,23 +312,10 @@ static void note_page(struct pg_state *st, unsigned long addr,
 	}
 }
 
-static void walk_pte(struct pg_state *st, pmd_t *pmd, unsigned long start,
-		     const char *domain)
-{
-	pte_t *pte = pte_offset_kernel(pmd, 0);
-	unsigned long addr;
-	unsigned i;
-
-	for (i = 0; i < PTRS_PER_PTE; i++, pte++) {
-		addr = start + i * PAGE_SIZE;
-		note_page(st, addr, 5, pte_val(*pte), domain);
-	}
-}
-
-static const char *get_domain_name(pmd_t *pmd)
+static const char *get_domain_name(pmdval_t pmdval)
 {
 #ifndef CONFIG_ARM_LPAE
-	switch (pmd_val(*pmd) & PMD_DOMAIN_MASK) {
+	switch (pmdval & PMD_DOMAIN_MASK) {
 	case PMD_DOMAIN(DOMAIN_KERNEL):
 		return "KERNEL ";
 	case PMD_DOMAIN(DOMAIN_USER):
@@ -339,89 +331,108 @@ static const char *get_domain_name(pmd_t *pmd)
 	return NULL;
 }
 
-static void walk_pmd(struct pg_state *st, pud_t *pud, unsigned long start)
+static void note_page_pte(struct ptdump_state *pt_st, unsigned long addr,
+			  pte_t pte)
 {
-	pmd_t *pmd = pmd_offset(pud, 0);
-	unsigned long addr;
-	unsigned i;
-	const char *domain;
+	struct pg_state *st = container_of(pt_st, struct pg_state, ptdump);
 
-	for (i = 0; i < PTRS_PER_PMD; i++, pmd++) {
-		addr = start + i * PMD_SIZE;
-		domain = get_domain_name(pmd);
-		if (pmd_none(*pmd) || pmd_leaf(*pmd) || !pmd_present(*pmd))
-			note_page(st, addr, 4, pmd_val(*pmd), domain);
-		else
-			walk_pte(st, pmd, addr, domain);
-
-		if (SECTION_SIZE < PMD_SIZE && pmd_leaf(pmd[1])) {
-			addr += SECTION_SIZE;
-			pmd++;
-			domain = get_domain_name(pmd);
-			note_page(st, addr, 4, pmd_val(*pmd), domain);
-		}
-	}
+	note_page(st, addr, 5, pte_val(pte), st->pmd_domain);
 }
 
-static void walk_pud(struct pg_state *st, p4d_t *p4d, unsigned long start)
+static void note_page_pmd(struct ptdump_state *pt_st, unsigned long addr,
+			  pmd_t pmd)
 {
-	pud_t *pud = pud_offset(p4d, 0);
-	unsigned long addr;
-	unsigned i;
+	struct pg_state *st = container_of(pt_st, struct pg_state, ptdump);
 
-	for (i = 0; i < PTRS_PER_PUD; i++, pud++) {
-		addr = start + i * PUD_SIZE;
-		if (!pud_none(*pud)) {
-			walk_pmd(st, pud, addr);
-		} else {
-			note_page(st, addr, 3, pud_val(*pud), NULL);
-		}
+	note_page(st, addr, 4, pmd_val(pmd), get_domain_name(pmd_val(pmd)));
+
+#ifndef CONFIG_ARM_LPAE
+	/*
+	 * In the classic page table format a pmd is a pair of 1MB section
+	 * entries.  The walker only passes the first one, and a page table
+	 * under it covers both, so only the second of a pair of sections
+	 * needs showing here.
+	 */
+	if (SECTION_SIZE < PMD_SIZE) {
+		pgd_t *pgd = pgd_offset(st->mm, addr);
+		p4d_t *p4d = p4d_offset(pgd, addr);
+		pud_t *pud = pud_offset(p4d, addr);
+		pmd_t second = pmd_offset(pud, addr)[1];
+
+		if (pmd_leaf(second))
+			note_page(st, addr + SECTION_SIZE, 4, pmd_val(second),
+				  get_domain_name(pmd_val(second)));
 	}
+#endif
 }
 
-static void walk_p4d(struct pg_state *st, pgd_t *pgd, unsigned long start)
+static void note_page_pud(struct ptdump_state *pt_st, unsigned long addr,
+			  pud_t pud)
 {
-	p4d_t *p4d = p4d_offset(pgd, 0);
-	unsigned long addr;
-	unsigned i;
+	struct pg_state *st = container_of(pt_st, struct pg_state, ptdump);
 
-	for (i = 0; i < PTRS_PER_P4D; i++, p4d++) {
-		addr = start + i * P4D_SIZE;
-		if (!p4d_none(*p4d)) {
-			walk_pud(st, p4d, addr);
-		} else {
-			note_page(st, addr, 2, p4d_val(*p4d), NULL);
-		}
-	}
+	note_page(st, addr, 3, pud_val(pud), NULL);
 }
 
-static void walk_pgd(struct pg_state *st, struct mm_struct *mm,
-			unsigned long start)
+static void note_page_p4d(struct ptdump_state *pt_st, unsigned long addr,
+			  p4d_t p4d)
 {
-	pgd_t *pgd = pgd_offset(mm, 0UL);
-	unsigned i;
-	unsigned long addr;
+	struct pg_state *st = container_of(pt_st, struct pg_state, ptdump);
 
-	for (i = 0; i < PTRS_PER_PGD; i++, pgd++) {
-		addr = start + i * PGDIR_SIZE;
-		if (!pgd_none(*pgd)) {
-			walk_p4d(st, pgd, addr);
-		} else {
-			note_page(st, addr, 1, pgd_val(*pgd), NULL);
-		}
-	}
+	note_page(st, addr, 2, p4d_val(p4d), NULL);
 }
 
-void ptdump_walk_pgd(struct seq_file *m, struct ptdump_info *info)
+static void note_page_pgd(struct ptdump_state *pt_st, unsigned long addr,
+			  pgd_t pgd)
+{
+	struct pg_state *st = container_of(pt_st, struct pg_state, ptdump);
+
+	note_page(st, addr, 1, pgd_val(pgd), NULL);
+}
+
+static void note_page_flush(struct ptdump_state *pt_st)
+{
+	struct pg_state *st = container_of(pt_st, struct pg_state, ptdump);
+
+	note_page(st, 0, 0, 0, NULL);
+}
+
+/*
+ * Called for every pmd before it is either noted as a section or walked,
+ * so the ptes under it know which domain they are in.
+ */
+static void effective_prot_pmd(struct ptdump_state *pt_st, pmd_t pmd)
+{
+	struct pg_state *st = container_of(pt_st, struct pg_state, ptdump);
+
+	st->pmd_domain = get_domain_name(pmd_val(pmd));
+}
+
+static const struct ptdump_state ptdump_ops = {
+	.note_page_pte = note_page_pte,
+	.note_page_pmd = note_page_pmd,
+	.note_page_pud = note_page_pud,
+	.note_page_p4d = note_page_p4d,
+	.note_page_pgd = note_page_pgd,
+	.note_page_flush = note_page_flush,
+	.effective_prot_pmd = effective_prot_pmd,
+};
+
+void ptdump_walk(struct seq_file *m, struct ptdump_info *info)
 {
 	struct pg_state st = {
+		.ptdump = ptdump_ops,
+		.mm = info->mm,
 		.seq = m,
 		.marker = info->markers,
 		.check_wx = false,
 	};
 
-	walk_pgd(&st, info->mm, info->base_addr);
-	note_page(&st, 0, 0, 0, NULL);
+	st.ptdump.range = (struct ptdump_range[]) {
+		{ info->base_addr, ~0UL },
+		{ 0, 0 },
+	};
+	ptdump_walk_pgd(&st.ptdump, info->mm, NULL);
 }
 
 static void __init ptdump_initialize(void)
@@ -450,9 +461,11 @@ static struct ptdump_info kernel_ptdump_info = {
 	.base_addr = 0,
 };
 
-void ptdump_check_wx(void)
+bool ptdump_check_wx(void)
 {
 	struct pg_state st = {
+		.ptdump = ptdump_ops,
+		.mm = &init_mm,
 		.seq = NULL,
 		.marker = (struct addr_marker[]) {
 			{ 0, NULL},
@@ -461,13 +474,19 @@ void ptdump_check_wx(void)
 		.check_wx = true,
 	};
 
-	walk_pgd(&st, &init_mm, 0);
-	note_page(&st, 0, 0, 0, NULL);
-	if (st.wx_pages)
+	st.ptdump.range = (struct ptdump_range[]) {
+		{ 0, ~0UL },
+		{ 0, 0 },
+	};
+	ptdump_walk_pgd(&st.ptdump, &init_mm, NULL);
+
+	if (st.wx_pages) {
 		pr_warn("Checked W+X mappings: FAILED, %lu W+X pages found\n",
 			st.wx_pages);
-	else
-		pr_info("Checked W+X mappings: passed, no W+X pages found\n");
+		return false;
+	}
+	pr_info("Checked W+X mappings: passed, no W+X pages found\n");
+	return true;
 }
 
 static int __init ptdump_init(void)
