@@ -81,6 +81,12 @@
 
 #define L_PMD_SECT_VALID	(_AT(pmdval_t, 1) << 0)
 #define L_PMD_SECT_DIRTY	(_AT(pmdval_t, 1) << 55)
+/*
+ * Set by pmd_mkinvalid() on a section entry whose valid bit it clears, so
+ * that pmd_present() keeps reporting the entry as present while the entry
+ * is being split.
+ */
+#define L_PMD_SECT_PRESENT_INVALID (_AT(pmdval_t, 1) << 56)
 #define L_PMD_SECT_NONE		(_AT(pmdval_t, 1) << 57)
 #define L_PMD_SECT_RDONLY	(_AT(pteval_t, 1) << 58)
 
@@ -118,7 +124,7 @@
 						 PMD_TYPE_TABLE)
 #define pmd_sect(pmd)		((pmd_val(pmd) & PMD_TYPE_MASK) == \
 						 PMD_TYPE_SECT)
-#define pmd_leaf(pmd)		pmd_sect(pmd)
+#define pmd_leaf(pmd)		(pmd_present(pmd) && !pmd_table(pmd))
 
 #define pud_clear(pudp)			\
 	do {				\
@@ -177,7 +183,9 @@ static inline pmd_t *pud_pgtable(pud_t pud)
 						: !!(pmd_val(pmd) & (val)))
 #define pmd_isclear(pmd, val)	(!(pmd_val(pmd) & (val)))
 
-#define pmd_present(pmd)	(pmd_isset((pmd), L_PMD_SECT_VALID))
+#define pmd_present(pmd)	(pmd_isset((pmd), L_PMD_SECT_VALID |	\
+					   L_PMD_SECT_NONE |		\
+					   L_PMD_SECT_PRESENT_INVALID))
 #define pmd_young(pmd)		(pmd_isset((pmd), PMD_SECT_AF))
 #define pte_special(pte)	(pte_isset((pte), L_PTE_SPECIAL))
 static inline pte_t pte_mkspecial(pte_t pte)
@@ -192,7 +200,13 @@ static inline pte_t pte_mkspecial(pte_t pte)
 #define pmd_hugewillfault(pmd)	(!pmd_young(pmd) || !pmd_write(pmd))
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
-#define pmd_trans_huge(pmd)	(pmd_val(pmd) && !pmd_table(pmd))
+/*
+ * A present-invalid section entry has no type bits left, so force the valid
+ * bit before asking whether it is a table.
+ */
+#define pmd_trans_huge(pmd)	(pmd_present(pmd) &&			\
+				 !pmd_table(__pmd(pmd_val(pmd) |	\
+						  L_PMD_SECT_VALID)))
 #endif
 
 #define PMD_BIT_FUNC(fn,op) \
@@ -216,7 +230,8 @@ PMD_BIT_FUNC(mkyoung,   |= PMD_SECT_AF);
 /* represent a notpresent pmd by faulting entry, this is used by pmdp_invalidate */
 static inline pmd_t pmd_mkinvalid(pmd_t pmd)
 {
-	return __pmd(pmd_val(pmd) & ~L_PMD_SECT_VALID);
+	return __pmd((pmd_val(pmd) & ~L_PMD_SECT_VALID) |
+		     L_PMD_SECT_PRESENT_INVALID);
 }
 
 static inline pmd_t pmd_modify(pmd_t pmd, pgprot_t newprot)
