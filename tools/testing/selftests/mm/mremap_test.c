@@ -1156,12 +1156,42 @@ out:
 		ksft_test_result_fail("%s\n", test_name);
 }
 
+/*
+ * remap_region() needs the source region and a non-overlapping destination
+ * mapped at the same time, so a case needs roughly twice its region size of
+ * free address space, plus room for the destination alignment and preamble.
+ *
+ * A 32-bit task has about 3GB of address space in total, so the 2GB cases
+ * cannot be set up there at all and get_source_mapping() fails with ENOMEM.
+ * Report those as skipped rather than failed.
+ */
+static bool test_case_fits_address_space(struct test test_case)
+{
+	unsigned long long needed;
+
+	if (sizeof(void *) > 4)
+		return true;
+
+	needed = 2ULL * test_case.config.region_size +
+		 test_case.config.dest_alignment +
+		 test_case.config.dest_preamble_size;
+
+	return needed <= (unsigned long long)_1GB;
+}
+
 static void run_mremap_test_case(struct test test_case, int *failures,
 				 unsigned int threshold_mb,
 				 char *rand_addr)
 {
-	long long remap_time = remap_region(test_case.config, threshold_mb,
-					    rand_addr);
+	long long remap_time;
+
+	if (!test_case_fits_address_space(test_case)) {
+		ksft_test_result_skip("%s\n", test_case.name);
+		return;
+	}
+
+	remap_time = remap_region(test_case.config, threshold_mb,
+				  rand_addr);
 
 	if (remap_time < 0) {
 		if (test_case.expect_failure)
