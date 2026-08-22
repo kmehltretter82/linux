@@ -22,9 +22,12 @@
 	if (IS_ENABLED(CONFIG_RISCV_ISA_ZABHA) &&				\
 	    riscv_has_extension_unlikely(RISCV_ISA_EXT_ZABHA)) {		\
 		__asm__ __volatile__ (						\
+			".option push\n"					\
+			".option arch, +zabha\n"				\
 			prepend							\
 			"	amoswap" swap_sfx " %0, %z2, %1\n"		\
 			swap_append						\
+			".option pop\n"					\
 			: "=&r" (r), "+A" (*(p))				\
 			: "rJ" (n)						\
 			: "memory");						\
@@ -140,9 +143,12 @@
 		r = o;								\
 										\
 		__asm__ __volatile__ (						\
+			".option push\n"					\
+			".option arch, +zabha, +zacas\n"			\
 			cas_prepend							\
 			"	amocas" cas_sfx " %0, %z2, %1\n"		\
 			cas_append							\
+			".option pop\n"					\
 			: "+&r" (r), "+A" (*(p))				\
 			: "rJ" (n)						\
 			: "memory");						\
@@ -187,9 +193,12 @@
 		r = o;							\
 									\
 		__asm__ __volatile__ (					\
+			".option push\n"				\
+			".option arch, +zacas\n"			\
 			cas_prepend					\
 			"	amocas" cas_sfx " %0, %z2, %1\n"	\
 			cas_append					\
+			".option pop\n"				\
 			: "+&r" (r), "+A" (*(p))			\
 			: "rJ" (n)					\
 			: "memory");					\
@@ -340,7 +349,10 @@ union __u128_halves {
 	register unsigned long t4 asm ("t4") = __ho.high;			\
 										\
 	__asm__ __volatile__ (							\
-		 "       amocas.q" cas_sfx " %0, %z3, %2"			\
+		 ".option push\n"						\
+		 ".option arch, +zacas\n"					\
+		 "       amocas.q" cas_sfx " %0, %z3, %2\n"			\
+		 ".option pop\n"						\
 		 : "+&r" (t3), "+&r" (t4), "+A" (*(p))				\
 		 : "rJ" (t1), "rJ" (t2)						\
 		 : "memory");							\

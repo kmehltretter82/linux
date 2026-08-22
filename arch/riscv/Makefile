@@ -81,7 +81,14 @@ riscv-march-$(CONFIG_TOOLCHAIN_HAS_ZACAS) := $(riscv-march-y)_zacas
 # Check if the toolchain supports Zabha
 riscv-march-$(CONFIG_TOOLCHAIN_HAS_ZABHA) := $(riscv-march-y)_zabha
 
-KBUILD_BASE_ISA = -march=$(shell echo $(riscv-march-y) | sed -E 's/(rv32ima|rv64ima)fd([^v_]*)v?/\1\2/')
+# Zacas and Zabha are only ever used from inline assembly, behind a runtime
+# check and a local ".option arch", so they must not be in the -march the
+# compiler sees: it would otherwise be free to emit them for its own code,
+# such as the __atomic builtins, on every CPU.  They stay in the assembler's
+# -march below.
+riscv-march-cc-y = $(shell echo $(riscv-march-y) | sed -E 's/_zacas//; s/_zabha//')
+
+KBUILD_BASE_ISA = -march=$(shell echo $(riscv-march-cc-y) | sed -E 's/(rv32ima|rv64ima)fd([^v_]*)v?/\1\2/')
 export KBUILD_BASE_ISA
 
 # Remove F,D,V from isa string for all. Keep extensions between "fd" and "v" by
@@ -91,7 +98,7 @@ KBUILD_CFLAGS += $(KBUILD_BASE_ISA)
 KBUILD_AFLAGS += -march=$(riscv-march-y)
 
 # For C code built with floating-point support, exclude V but keep F and D.
-CC_FLAGS_FPU  := -march=$(shell echo $(riscv-march-y) | sed -E 's/(rv32ima|rv64ima)([^v_]*)v?/\1\2/')
+CC_FLAGS_FPU  := -march=$(shell echo $(riscv-march-cc-y) | sed -E 's/(rv32ima|rv64ima)([^v_]*)v?/\1\2/')
 
 KBUILD_CFLAGS += -mno-save-restore
 
