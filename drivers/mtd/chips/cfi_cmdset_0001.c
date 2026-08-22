@@ -1716,6 +1716,46 @@ static int cfi_intelext_write_words (struct mtd_info *mtd, loff_t to , size_t le
 }
 
 
+/*
+ * Kept out of line, and out of do_write_buffer(), because every CMD()
+ * materialises a map_word temporary.  map_word is MAX_MAP_BANKWIDTH bytes,
+ * 32 of them once CONFIG_MTD_MAP_BANK_WIDTH_32 is enabled, so inlining these
+ * cold recovery paths pushes do_write_buffer() over the frame size limit on
+ * 32-bit targets.
+ */
+static noinline void __xipram do_write_buffer_clear_sr(struct map_info *map,
+						       struct flchip *chip,
+						       unsigned long cmd_adr,
+						       map_word status)
+{
+	struct cfi_private *cfi = map->fldrv_priv;
+
+	xip_enable(map, chip, cmd_adr);
+	printk(KERN_WARNING "SR.4 or SR.5 bits set in buffer write (status %lx). Clearing.\n",
+	       status.x[0]);
+	xip_disable(map, chip, cmd_adr);
+	map_write(map, CMD(0x50), cmd_adr);
+	map_write(map, CMD(0x70), cmd_adr);
+}
+
+static noinline void __xipram do_write_buffer_not_ready(struct map_info *map,
+							struct flchip *chip,
+							unsigned long cmd_adr)
+{
+	struct cfi_private *cfi = map->fldrv_priv;
+	map_word Xstatus = map_read(map, cmd_adr);
+	map_word status;
+
+	map_write(map, CMD(0x70), cmd_adr);
+	chip->state = FL_STATUS;
+	status = map_read(map, cmd_adr);
+	map_write(map, CMD(0x50), cmd_adr);
+	map_write(map, CMD(0x70), cmd_adr);
+	xip_enable(map, chip, cmd_adr);
+	printk(KERN_ERR "%s: Chip not ready for buffer write. Xstatus = %lx, status = %lx\n",
+	       map->name, Xstatus.x[0], status.x[0]);
+}
+
 static int __xipram do_write_buffer(struct map_info *map, struct flchip *chip,
 				    unsigned long adr, const struct kvec **pvec,
 				    unsigned long *pvec_seek, int len)
@@ -1763,28 +1803,15 @@ static int __xipram do_write_buffer(struct map_info *map, struct flchip *chip,
 		chip->state = FL_STATUS;
 	}
 	status = map_read(map, cmd_adr);
-	if (map_word_bitsset(map, status, CMD(0x30))) {
-		xip_enable(map, chip, cmd_adr);
-		printk(KERN_WARNING "SR.4 or SR.5 bits set in buffer write (status %lx). Clearing.\n", status.x[0]);
-		xip_disable(map, chip, cmd_adr);
-		map_write(map, CMD(0x50), cmd_adr);
-		map_write(map, CMD(0x70), cmd_adr);
-	}
+	if (map_word_bitsset(map, status, CMD(0x30)))
+		do_write_buffer_clear_sr(map, chip, cmd_adr, status);
 
 	chip->state = FL_WRITING_TO_BUFFER;
 	map_write(map, write_cmd, cmd_adr);
 	ret = WAIT_TIMEOUT(map, chip, cmd_adr, 0, 0);
 	if (ret) {
 		/* Argh. Not ready for write to buffer */
-		map_word Xstatus = map_read(map, cmd_adr);
-		map_write(map, CMD(0x70), cmd_adr);
-		chip->state = FL_STATUS;
-		status = map_read(map, cmd_adr);
-		map_write(map, CMD(0x50), cmd_adr);
-		map_write(map, CMD(0x70), cmd_adr);
-		xip_enable(map, chip, cmd_adr);
-		printk(KERN_ERR "%s: Chip not ready for buffer write. Xstatus = %lx, status = %lx\n",
-				map->name, Xstatus.x[0], status.x[0]);
+		do_write_buffer_not_ready(map, chip, cmd_adr);
 		goto out;
 	}
 
