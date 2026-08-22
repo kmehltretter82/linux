@@ -1745,6 +1745,74 @@ static void __init early_fixmap_shutdown(void)
  * paging_init() sets up the page tables, initialises the zone memory
  * maps, and sets up the zero page, bad page and bad page tables.
  */
+/*
+ * DEBUG_PAGEALLOC unmaps pages of RAM as the page allocator frees them and
+ * maps them back as it hands them out, one page at a time.  That needs RAM
+ * to be mapped with page table entries, while map_lowmem() uses sections
+ * wherever it can.
+ *
+ * Do the conversion as a second pass once lowmem is mapped and early_alloc()
+ * can be used, by giving each section mapped pmd of RAM a page table that
+ * maps the same memory the same way, as arch_kfence_init_pool() does for
+ * the KFENCE pool.  Doing it inside map_lowmem() instead would allocate the
+ * page tables from memory that is not mapped yet.
+ *
+ * The kernel image is left alone.  Its permissions are managed by
+ * section_update() in init.c, which rewrites section entries in place and
+ * would corrupt a table entry.  Pages freed out of it, the init sections,
+ * are therefore not protected, and __kernel_map_pages() checks for a
+ * section before touching anything.  On the classic page table format a
+ * pmd covers two sections, so a pmd shared with the image stays as it is.
+ */
+static void __init debug_pagealloc_split_lowmem(void)
+{
+	const struct mem_type *type = &mem_types[MT_MEMORY_RW];
+	phys_addr_t start, end;
+	unsigned long split = 0;
+	u64 i;
+
+	if (!debug_pagealloc_enabled())
+		return;
+
+	for_each_mem_range(i, &start, &end) {
+		unsigned long addr, limit;
+
+		if (end > arm_lowmem_limit)
+			end = arm_lowmem_limit;
+		if (start >= end)
+			continue;
+
+		addr = __phys_to_virt(start) & PMD_MASK;
+		limit = __phys_to_virt(end);
+
+		for (; addr < limit; addr += PMD_SIZE) {
+			phys_addr_t phys = __pa(addr);
+			unsigned long pfn = __phys_to_pfn(phys);
+			pmd_t *pmd = pmd_off_k(addr);
+			pte_t *pte;
+			int n;
+
+			if (phys < kernel_sec_end &&
+			    phys + PMD_SIZE > kernel_sec_start)
+				continue;
+			if (!pmd_leaf(*pmd))
+				continue;
+
+			pte = early_alloc(PTE_HWTABLE_OFF + PTE_HWTABLE_SIZE);
+			for (n = 0; n < PTRS_PER_PTE; n++)
+				set_pte_ext(pte + n,
+					    pfn_pte(pfn + n, __pgprot(type->prot_pte)),
+					    0);
+			__pmd_populate(pmd, __pa(pte), type->prot_l1);
+			split++;
+		}
+	}
+
+	local_flush_tlb_all();
+	pr_info("debug_pagealloc: %lu section mappings of RAM split into pages\n",
+		split);
+}
+
 void __init paging_init(const struct machine_desc *mdesc)
 {
 #ifdef CONFIG_XIP_KERNEL
@@ -1759,6 +1827,7 @@ void __init paging_init(const struct machine_desc *mdesc)
 	map_lowmem();
 	memblock_set_current_limit(arm_lowmem_limit);
 	pr_debug("lowmem limit is %08llx\n", (long long)arm_lowmem_limit);
+	debug_pagealloc_split_lowmem();
 	/*
 	 * After this point early_alloc(), i.e. the memblock allocator, can
 	 * be used
