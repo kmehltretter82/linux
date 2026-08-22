@@ -11,6 +11,7 @@ CFLAGS_REMOVE_cacheflush.o = $(CC_FLAGS_FTRACE)
 endif
 
 KCOV_INSTRUMENT_init.o := n
+KCSAN_SANITIZE_init.o := n
 
 obj-y += init.o
 obj-$(CONFIG_MMU) += extable.o fault.o pageattr.o pgtable.o tlbflush.o

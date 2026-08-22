@@ -9,3 +9,7 @@ endif
 endif
 
 obj-y += errata.o
+
+ifdef CONFIG_KCSAN
+KCSAN_SANITIZE_errata.o := n
+endif
