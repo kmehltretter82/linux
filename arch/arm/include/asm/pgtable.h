@@ -141,7 +141,17 @@ extern pgprot_t phys_mem_access_prot(struct file *file, unsigned long pfn,
 
 extern pgd_t swapper_pg_dir[PTRS_PER_PGD];
 
-#define pgdp_get(pgpd)		READ_ONCE(*pgdp)
+/*
+ * The classic 2-level pgd_t wraps a two-entry array, which READ_ONCE()
+ * cannot load; the LPAE pgd_t is a single value and can be.  2-level has
+ * no lockless page table walkers (GUP-fast is LPAE only), so a plain read
+ * is both necessary and sufficient there.
+ */
+#ifdef CONFIG_ARM_LPAE
+#define pgdp_get(pgdp)		READ_ONCE(*(pgdp))
+#else
+#define pgdp_get(pgdp)		(*(pgdp))
+#endif
 
 #define pud_page(pud)		pmd_page(__pmd(pud_val(pud)))
 #define pud_write(pud)		pmd_write(__pmd(pud_val(pud)))
