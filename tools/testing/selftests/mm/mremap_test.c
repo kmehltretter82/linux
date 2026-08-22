@@ -745,7 +745,12 @@ static void mremap_move_multi_invalid_vmas(FILE *maps_fp,
 	if (uffd == -1) {
 		err = errno;
 		perror("userfaultfd");
-		if (err == EPERM) {
+		/*
+		 * EPERM is unprivileged userfaultfd being switched off, ENOSYS
+		 * is a kernel built without CONFIG_USERFAULTFD.  Neither is a
+		 * test failure.
+		 */
+		if (err == EPERM || err == ENOSYS) {
 			ksft_test_result_skip("%s - missing uffd", test_name);
 			return;
 		}
