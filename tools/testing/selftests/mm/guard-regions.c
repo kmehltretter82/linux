@@ -2106,8 +2106,8 @@ TEST_F(guard_regions, pagemap)
 	/* Read from pagemap, and assert no guard regions are detected. */
 	for (i = 0; i < 10; i++) {
 		char *ptr_p = &ptr[i * page_size];
-		unsigned long entry = pagemap_get_entry(proc_fd, ptr_p);
-		unsigned long masked = entry & PM_GUARD_REGION;
+		uint64_t entry = pagemap_get_entry(proc_fd, ptr_p);
+		uint64_t masked = entry & PM_GUARD_REGION;
 
 		ASSERT_EQ(masked, 0);
 	}
@@ -2122,8 +2122,8 @@ TEST_F(guard_regions, pagemap)
 	/* Re-read from pagemap, and assert guard regions are detected. */
 	for (i = 0; i < 10; i++) {
 		char *ptr_p = &ptr[i * page_size];
-		unsigned long entry = pagemap_get_entry(proc_fd, ptr_p);
-		unsigned long masked = entry & PM_GUARD_REGION;
+		uint64_t entry = pagemap_get_entry(proc_fd, ptr_p);
+		uint64_t masked = entry & PM_GUARD_REGION;
 
 		ASSERT_EQ(masked, i % 2 == 0 ? PM_GUARD_REGION : 0);
 	}
@@ -2156,10 +2156,10 @@ TEST_F(guard_regions, pagemap_scan)
 		    PROT_READ | PROT_WRITE, 0, 0);
 	ASSERT_NE(ptr, MAP_FAILED);
 
-	pm_scan_args.start = (long)ptr;
-	pm_scan_args.end = (long)ptr + 10 * page_size;
+	pm_scan_args.start = (unsigned long)ptr;
+	pm_scan_args.end = (unsigned long)ptr + 10 * page_size;
 	ASSERT_EQ(ioctl(proc_fd, PAGEMAP_SCAN, &pm_scan_args), 0);
-	ASSERT_EQ(pm_scan_args.walk_end, (long)ptr + 10 * page_size);
+	ASSERT_EQ(pm_scan_args.walk_end, (unsigned long)ptr + 10 * page_size);
 
 	/* Install a guard region in every other page. */
 	for (i = 0; i < 10; i += 2) {
@@ -2173,11 +2173,11 @@ TEST_F(guard_regions, pagemap_scan)
 	 * region spans every other page within the range of 10 pages.
 	 */
 	ASSERT_EQ(ioctl(proc_fd, PAGEMAP_SCAN, &pm_scan_args), 5);
-	ASSERT_EQ(pm_scan_args.walk_end, (long)ptr + 10 * page_size);
+	ASSERT_EQ(pm_scan_args.walk_end, (unsigned long)ptr + 10 * page_size);
 
 	/* Re-read from pagemap, and assert guard regions are detected. */
 	for (i = 0; i < 5; i++) {
-		long ptr_p = (long)&ptr[2 * i * page_size];
+		unsigned long ptr_p = (unsigned long)&ptr[2 * i * page_size];
 
 		ASSERT_EQ(pm_regs[i].start, ptr_p);
 		ASSERT_EQ(pm_regs[i].end, ptr_p + page_size);
