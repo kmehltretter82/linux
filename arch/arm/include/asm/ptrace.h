@@ -151,6 +151,26 @@ static inline unsigned long regs_get_register(struct pt_regs *regs,
 }
 
 /* Valid only for Kernel mode traps. */
+/**
+ * regs_get_kernel_argument() - get Nth function argument in kernel
+ * @regs:	pt_regs of that context
+ * @n:		function argument number (start from 0)
+ *
+ * Note that this chooses the most likely register mapping.  In very rare
+ * cases this may not return correct data, for example if one of the
+ * function parameters is 8 bytes or bigger; the register assignment of
+ * subsequent parameters is then shifted.
+ */
+static inline unsigned long regs_get_kernel_argument(struct pt_regs *regs,
+						     unsigned int n)
+{
+#define NR_REG_ARGUMENTS 4
+	if (n < NR_REG_ARGUMENTS)
+		return regs->uregs[n];
+	n -= NR_REG_ARGUMENTS;
+	return regs_get_kernel_stack_nth(regs, n);
+}
+
 static inline unsigned long kernel_stack_pointer(struct pt_regs *regs)
 {
 	return regs->ARM_sp;
