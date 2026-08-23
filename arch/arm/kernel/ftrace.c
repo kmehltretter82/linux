@@ -257,11 +257,24 @@ err_out:
 			.lr = self_addr,
 			.pc = self_addr,
 		};
-		if (unwind_frame(&frame) < 0)
-			return;
-		if (frame.lr != self_addr)
-			parent = frame.lr_addr;
-		frame_pointer = frame.sp;
+		if (unwind_frame(&frame) < 0) {
+			/*
+			 * The unwinder has no information for this function,
+			 * for example a small leaf function that never stores
+			 * anything on the stack.  The return address is then
+			 * still in the slot the mcount trampoline saved it in,
+			 * which is what 'parent' already points at, and the
+			 * frame pointer recorded for HAVE_FUNCTION_GRAPH_FP_TEST
+			 * is the entry stack pointer, which such a function has
+			 * restored by the time it returns.  Fall back to those
+			 * rather than dropping the trace for the function.
+			 */
+			frame_pointer = stack_pointer;
+		} else {
+			if (frame.lr != self_addr)
+				parent = frame.lr_addr;
+			frame_pointer = frame.sp;
+		}
 	}
 
 	old = *parent;
