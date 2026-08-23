@@ -108,6 +108,28 @@ void __kprobes __patch_text_real(void *addr, unsigned int insn, bool remap)
 			   (uintptr_t)(addr) + size);
 }
 
+/*
+ * Write a raw 32-bit word into (possibly read-only) kernel or module text,
+ * for example the literal a static call trampoline jumps through.  Unlike
+ * __patch_text() this stores the value as data, with no instruction endian
+ * conversion, so it is correct on BE8.  A single aligned store is atomic
+ * against a CPU executing the trampoline, which reads either the old or the
+ * new target, both valid, so no stop_machine() is needed.
+ */
+void __kprobes patch_text_word(void *addr, u32 word)
+{
+	unsigned long flags;
+	void *waddr = addr;
+
+	waddr = patch_map(addr, FIX_TEXT_POKE0, &flags);
+	*(u32 *)waddr = word;
+	if (waddr != addr) {
+		flush_kernel_vmap_range(waddr, sizeof(u32));
+		patch_unmap(FIX_TEXT_POKE0, &flags);
+	}
+	flush_icache_range((uintptr_t)addr, (uintptr_t)addr + sizeof(u32));
+}
+
 static int __kprobes patch_text_stop_machine(void *data)
 {
 	struct patch *patch = data;

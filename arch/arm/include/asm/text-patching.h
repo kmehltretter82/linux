@@ -4,6 +4,7 @@
 
 void patch_text(void *addr, unsigned int insn);
 void __patch_text_real(void *addr, unsigned int insn, bool remap);
+void patch_text_word(void *addr, u32 word);
 
 static inline void __patch_text(void *addr, unsigned int insn)
 {
