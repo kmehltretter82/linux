@@ -1800,3 +1800,71 @@ void set_ptes(struct mm_struct *mm, unsigned long addr,
 		pteval = pte_next_pfn(pteval);
 	}
 }
+
+#ifdef CONFIG_HAVE_ARCH_HUGE_VMAP
+/*
+ * Huge (PMD/2MB section) mappings for vmap and ioremap.  Only LPAE selects
+ * HAVE_ARCH_HUGE_VMAP; on LPAE a block descriptor and a page descriptor share
+ * the same attribute layout, so a section is a page-table entry with the
+ * table bit cleared.  The PUD and P4D are folded onto the PGD, so only the
+ * PMD level offers blocks.
+ */
+int pud_set_huge(pud_t *pud, phys_addr_t phys, pgprot_t prot)
+{
+	return 0;
+}
+
+int pud_clear_huge(pud_t *pud)
+{
+	return 0;
+}
+
+int p4d_free_pud_page(p4d_t *p4d, unsigned long addr)
+{
+	return 0;
+}
+
+int pud_free_pmd_page(pud_t *pud, unsigned long addr)
+{
+	return 0;
+}
+
+int pmd_set_huge(pmd_t *pmdp, phys_addr_t phys, pgprot_t prot)
+{
+	pmd_t pmd = pfn_pmd(__phys_to_pfn(phys), prot);
+
+	if (WARN_ON(phys & ~PMD_MASK))
+		return 0;
+
+	pmd = pmd_mkhuge(pmd_mkyoung(pmd));
+	*pmdp = pmd;
+	flush_pmd_entry(pmdp);
+	return 1;
+}
+
+int pmd_clear_huge(pmd_t *pmdp)
+{
+	if (!pmd_leaf(*pmdp))
+		return 0;
+	pmd_clear(pmdp);
+	return 1;
+}
+
+int pmd_free_pte_page(pmd_t *pmdp, unsigned long addr)
+{
+	pte_t *table;
+
+	if (pmd_none(*pmdp))
+		return 1;
+	if (!pmd_table(*pmdp)) {
+		WARN_ON(1);
+		return 1;
+	}
+
+	table = pmd_page_vaddr(*pmdp);
+	pmd_clear(pmdp);
+	flush_tlb_kernel_range(addr, addr + PMD_SIZE);
+	pte_free_kernel(&init_mm, table);
+	return 1;
+}
+#endif /* CONFIG_HAVE_ARCH_HUGE_VMAP */

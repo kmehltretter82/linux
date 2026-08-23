@@ -94,6 +94,19 @@
 #define IOREMAP_MAX_ORDER	24
 #endif
 
+#ifdef CONFIG_HAVE_ARCH_HUGE_VMAP
+/*
+ * Let ioremap() lay down 2MB PMD sections.  The generic huge-vmap path
+ * only uses a block mapping when the vmalloc area it is given is aligned
+ * to the block size, and the default IOREMAP_MAX_ORDER caps that alignment
+ * below a section.  21 is PMD_SHIFT on LPAE, the only config that selects
+ * HAVE_ARCH_HUGE_VMAP; PMD_SHIFT itself is not available this early.
+ */
+#ifndef IOREMAP_MAX_ORDER
+#define IOREMAP_MAX_ORDER	21
+#endif
+#endif
+
 #define VECTORS_BASE		UL(0xffff0000)
 
 #else /* CONFIG_MMU */
