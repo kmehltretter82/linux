@@ -293,6 +293,9 @@ ENTRY(return_to_handler)
 	str	r2, [sp, #S_R2]
 	str	r3, [sp, #S_R3]
 	str	ip, [sp, #S_FP]
+#ifdef CONFIG_THUMB2_KERNEL
+	str	ip, [sp, #S_R7]			@ frame_pointer() is r7 on Thumb-2
+#endif
 	mov	r0, sp
 	bl	ftrace_return_to_handler
 	mov	lr, r0				@ r0 has real ret addr
