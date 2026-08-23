@@ -4,7 +4,8 @@
 
 #define HAVE_FUNCTION_GRAPH_FP_TEST
 
-#ifdef CONFIG_DYNAMIC_FTRACE_WITH_REGS
+#if defined(CONFIG_DYNAMIC_FTRACE_WITH_REGS) || \
+	defined(CONFIG_DYNAMIC_FTRACE_WITH_ARGS)
 #define ARCH_SUPPORTS_FTRACE_OPS 1
 #endif
 
@@ -58,6 +59,36 @@ static inline void *return_address(unsigned int level)
 #define ftrace_return_address(n) return_address(n)
 
 #define ARCH_HAS_SYSCALL_MATCH_SYM_NAME
+
+#ifdef CONFIG_DYNAMIC_FTRACE_WITH_ARGS
+struct ftrace_ops;
+struct ftrace_regs;
+#define ftrace_graph_func ftrace_graph_func
+void ftrace_graph_func(unsigned long ip, unsigned long parent_ip,
+		       struct ftrace_ops *op, struct ftrace_regs *fregs);
+
+/*
+ * Both ftrace trampolines build a full pt_regs, but only the SAVE_REGS one
+ * (ftrace_regs_caller) stores a real CPSR; the args-only ftrace_caller leaves
+ * it zero.  Return the pt_regs only for a SAVE_REGS frame, as the generic
+ * contract wants; args-only callers reach the registers through
+ * ftrace_partial_regs() (HAVE_FTRACE_REGS_HAVING_PT_REGS).  A macro so
+ * arch_ftrace_regs() resolves at the call site.
+ */
+#define arch_ftrace_get_regs(fregs)					\
+	(arch_ftrace_regs(fregs)->regs.ARM_cpsr ?			\
+	 &arch_ftrace_regs(fregs)->regs : NULL)
+
+#define ftrace_regs_set_instruction_pointer(fregs, ip) \
+	(arch_ftrace_regs(fregs)->regs.ARM_pc = (ip))
+
+/*
+ * A macro, not an inline, so arch_ftrace_regs() resolves at the call site:
+ * it comes from <linux/ftrace_regs.h>, included after this header.
+ */
+#define ftrace_regs_get_return_address(fregs) \
+	(arch_ftrace_regs(fregs)->regs.ARM_lr)
+#endif
 
 static inline bool arch_syscall_match_sym_name(const char *sym,
 					       const char *name)

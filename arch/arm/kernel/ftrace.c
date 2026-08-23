@@ -13,6 +13,7 @@
  */
 
 #include <linux/ftrace.h>
+#include <linux/ftrace_regs.h>
 #include <linux/uaccess.h>
 #include <linux/module.h>
 #include <linux/stop_machine.h>
@@ -223,10 +224,11 @@ int ftrace_make_nop(struct module *mod,
 #endif /* CONFIG_DYNAMIC_FTRACE */
 
 #ifdef CONFIG_FUNCTION_GRAPH_TRACER
-asmlinkage
-void prepare_ftrace_return(unsigned long *parent, unsigned long self_addr,
-			   unsigned long frame_pointer,
-			   unsigned long stack_pointer)
+static __always_inline void
+__prepare_ftrace_return(unsigned long *parent, unsigned long self_addr,
+			unsigned long frame_pointer,
+			unsigned long stack_pointer,
+			struct ftrace_regs *fregs)
 {
 	unsigned long return_hooker = (unsigned long) &return_to_handler;
 	unsigned long old;
@@ -267,11 +269,47 @@ err_out:
 	old = *parent;
 	*parent = return_hooker;
 
-	if (function_graph_enter(old, self_addr, frame_pointer, NULL))
+	if (function_graph_enter_regs(old, self_addr, frame_pointer,
+				      fregs ? parent : NULL, fregs))
 		*parent = old;
 }
 
-#ifdef CONFIG_DYNAMIC_FTRACE
+asmlinkage
+void prepare_ftrace_return(unsigned long *parent, unsigned long self_addr,
+			   unsigned long frame_pointer,
+			   unsigned long stack_pointer)
+{
+	__prepare_ftrace_return(parent, self_addr, frame_pointer,
+				stack_pointer, NULL);
+}
+
+#ifdef CONFIG_DYNAMIC_FTRACE_WITH_ARGS
+void ftrace_graph_func(unsigned long ip, unsigned long parent_ip,
+		       struct ftrace_ops *op, struct ftrace_regs *fregs)
+{
+	struct pt_regs *regs = &arch_ftrace_regs(fregs)->regs;
+	/*
+	 * frame_pointer() is r7 on Thumb-2 and r11 on ARM, matching the
+	 * register the mcount based graph caller passes as 'fpreg'.  Using
+	 * regs->ARM_fp unconditionally would feed the wrong register to the
+	 * unwinder on Thumb-2 and make it fail for functions that use r7 as
+	 * their frame pointer.  The stack pointer of the instrumented function
+	 * is at the top of the ftrace_regs frame.
+	 */
+	unsigned long frame_pointer = frame_pointer(regs);
+	unsigned long stack_pointer = (unsigned long)(regs + 1);
+	unsigned long *parent;
+
+	if (IS_ENABLED(CONFIG_UNWINDER_FRAME_POINTER))
+		parent = (unsigned long *)(frame_pointer - 4);
+	else
+		parent = &regs->ARM_lr;
+
+	__prepare_ftrace_return(parent, ip, frame_pointer, stack_pointer, fregs);
+}
+#endif
+
+#if defined(CONFIG_DYNAMIC_FTRACE) && !defined(CONFIG_DYNAMIC_FTRACE_WITH_ARGS)
 extern unsigned long ftrace_graph_call;
 extern unsigned long ftrace_graph_call_old;
 extern void ftrace_graph_caller_old(void);

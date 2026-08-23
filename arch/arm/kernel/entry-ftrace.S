@@ -82,6 +82,9 @@
 	@ 0  4          48   52       56            60   64    68       72
 	@ R0 | R1 | ... | IP | SP + 4 | previous LR | LR | PSR | OLD_R0 |
 
+	mrs	ip, cpsr			@ mark this as a full-regs frame
+	str	ip, [sp, #S_PSR]
+
 	mov	r3, sp				@ struct pt_regs*
 
 	ldr_va	r2, function_trace_op		@ pointer to the current
@@ -137,6 +140,31 @@ THUMB(	nop.w		)
 #endif
 
 .macro __ftrace_caller suffix
+#ifdef CONFIG_DYNAMIC_FTRACE_WITH_ARGS
+	@ Build a full pt_regs, exactly as __ftrace_regs_caller does, so the
+	@ callback receives a valid struct ftrace_regs (WITH_ARGS).  fgraph
+	@ reaches the default caller too, so the graph entry runs from here
+	@ via ftrace_graph_func() rather than the patched ftrace_graph_call.
+	str	lr, [sp, #-8]!	@ store LR as PC and make space for CPSR/OLD_R0
+	ldr	lr, [sp, #8]	@ get previous LR
+	str	r0, [sp, #8]	@ write r0 as OLD_R0 over previous LR
+	str	lr, [sp, #-4]!	@ store previous LR as LR
+	add	lr, sp, #16	@ move in LR the value of SP as it was
+	push	{r0-r11, ip, lr}
+	mov	ip, #0				@ args-only frame: clear CPSR marker
+	str	ip, [sp, #S_PSR]
+	mov	r3, sp				@ struct ftrace_regs *
+	ldr_va	r2, function_trace_op		@ current tracing op
+	ldr	r1, [sp, #S_LR]			@ lr of instrumented func
+	ldr	lr, [sp, #S_PC]			@ get LR
+	mcount_adjust_addr	r0, lr		@ instrumented function
+	.globl ftrace_call\suffix
+ftrace_call\suffix:
+	bl	ftrace_stub
+	pop	{r0-r11, ip, lr}		@ restore r0 through r12
+	ldr	lr, [sp], #4			@ restore LR
+	ldr	pc, [sp], #12
+#else
 	mcount_enter
 
 	mcount_get_lr	r1			@ lr of instrumented func
@@ -160,6 +188,7 @@ THUMB(	nop.w		)
 #endif
 
 	mcount_exit
+#endif /* CONFIG_DYNAMIC_FTRACE_WITH_ARGS */
 .endm
 
 .macro __ftrace_graph_caller
