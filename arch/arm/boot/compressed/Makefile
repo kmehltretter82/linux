@@ -93,6 +93,11 @@ targets       := vmlinux vmlinux.lds piggy_data piggy.o \
 
 KBUILD_CFLAGS += -DDISABLE_BRANCH_PROFILING
 
+# The decompressor is a self-contained mini-vmlinux with its own linker
+# script that ASSERTs some symbols are global; whole-program LTO would
+# internalise them, so build it without LTO, as the pi/ and EFI stub do.
+KBUILD_CFLAGS := $(filter-out $(CC_FLAGS_LTO), $(KBUILD_CFLAGS))
+
 ccflags-y := -fpic $(call cc-option,-mno-single-pic-base,) -fno-builtin \
 	     -I$(srctree)/scripts/dtc/libfdt -fno-stack-protector \
 	     $(DISABLE_KSTACK_ERASE) \
