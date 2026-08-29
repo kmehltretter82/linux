@@ -803,6 +803,54 @@ static void test_reset_preserves_id_regs(struct kvm_vcpu *vcpu)
 	ksft_test_result_pass("%s\n", __func__);
 }
 
+static void test_pmuver(void)
+{
+	struct kvm_vcpu_init init;
+	struct kvm_vcpu *vcpu;
+	struct kvm_vm *vm;
+	u64 dfr0, val;
+	u8 pmuver;
+	int ret;
+
+	if (!kvm_has_cap(KVM_CAP_ARM_PMU_V3)) {
+		ksft_test_result_skip("PMUv3 not supported\n");
+		return;
+	}
+
+	vm = vm_create(1);
+	vm_enable_cap(vm, KVM_CAP_ARM_WRITABLE_IMP_ID_REGS, 0);
+
+	kvm_get_default_vcpu_target(vm, &init);
+	init.features[0] |= BIT(KVM_ARM_VCPU_PMU_V3);
+	vcpu = aarch64_vcpu_add(vm, 0, &init, guest_code);
+	kvm_arch_vm_finalize_vcpus(vm);
+
+	dfr0 = vcpu_get_reg(vcpu, KVM_ARM64_SYS_REG(SYS_ID_AA64DFR0_EL1));
+	for (pmuver = ID_AA64DFR0_EL1_PMUVer_IMP + 1;
+	     pmuver < ID_AA64DFR0_EL1_PMUVer_V3P1; pmuver++) {
+		val = FIELD_PREP(ID_AA64DFR0_EL1_PMUVer, pmuver) |
+		      (dfr0 & ~ID_AA64DFR0_EL1_PMUVer_MASK);
+		errno = 0;
+		ret = __vcpu_set_reg(vcpu,
+				     KVM_ARM64_SYS_REG(SYS_ID_AA64DFR0_EL1), val);
+		TEST_ASSERT(ret < 0 && errno == EINVAL,
+			    "Unexpected result for reserved PMUVer 0x%x: ret=%d, errno=%d",
+			    pmuver, ret, errno);
+	}
+
+	val = dfr0 & ~ID_AA64DFR0_EL1_PMUVer_MASK;
+	vcpu_set_reg(vcpu, KVM_ARM64_SYS_REG(SYS_ID_AA64DFR0_EL1), val);
+
+	/* Exercise the PMU reset path with PMUVer set to NI. */
+	aarch64_vcpu_setup(vcpu, &init);
+	val = vcpu_get_reg(vcpu, KVM_ARM64_SYS_REG(SYS_ID_AA64DFR0_EL1));
+	TEST_ASSERT_EQ(FIELD_GET(ID_AA64DFR0_EL1_PMUVer, val),
+		       ID_AA64DFR0_EL1_PMUVer_NI);
+
+	kvm_vm_free(vm);
+	ksft_test_result_pass("writable PMUVer values\n");
+}
+
 int main(void)
 {
 	struct kvm_vcpu *vcpu;
@@ -828,7 +876,7 @@ int main(void)
 
 	ksft_print_header();
 
-	test_cnt = 3 + MPAM_IDREG_TEST + MTE_IDREG_TEST;
+	test_cnt = 4 + MPAM_IDREG_TEST + MTE_IDREG_TEST;
 	for (i = 0; i < ARRAY_SIZE(test_regs); i++)
 		for (j = 0; test_regs[i].ftr_bits[j].type != FTR_END; j++)
 			test_cnt++;
@@ -846,6 +894,7 @@ int main(void)
 	test_reset_preserves_id_regs(vcpu);
 
 	kvm_vm_free(vm);
+	test_pmuver();
 
 	ksft_finished();
 }
