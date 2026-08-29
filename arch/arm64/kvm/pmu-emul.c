@@ -43,6 +43,8 @@ static struct kvm_pmc *kvm_vcpu_idx_to_pmc(struct kvm_vcpu *vcpu, int cnt_idx)
 static u32 __kvm_pmu_event_mask(unsigned int pmuver)
 {
 	switch (pmuver) {
+	case ID_AA64DFR0_EL1_PMUVer_NI:
+		return 0;
 	case ID_AA64DFR0_EL1_PMUVer_IMP:
 		return GENMASK(9, 0);
 	case ID_AA64DFR0_EL1_PMUVer_V3P1:

@@ -2273,6 +2273,11 @@ static int set_id_aa64dfr0_el1(struct kvm_vcpu *vcpu,
 	if (pmuver == ID_AA64DFR0_EL1_PMUVer_IMP_DEF)
 		val &= ~ID_AA64DFR0_EL1_PMUVer_MASK;
 
+	/* Reject the reserved encodings between PMUv3 and PMUv3p1. */
+	if (pmuver > ID_AA64DFR0_EL1_PMUVer_IMP &&
+	    pmuver < ID_AA64DFR0_EL1_PMUVer_V3P1)
+		return -EINVAL;
+
 	/*
 	 * ID_AA64DFR0_EL1.DebugVer is one of those awkward fields with a
 	 * nonzero minimum safe value.
