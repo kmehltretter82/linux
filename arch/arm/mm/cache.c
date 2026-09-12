@@ -7,6 +7,33 @@
 #include <linux/types.h>
 #include <asm/cacheflush.h>
 
+#ifdef CONFIG_CPU_CACHE_V3
+void v3_flush_icache_all(void);
+void v3_flush_kern_cache_all(void);
+void v3_flush_user_cache_all(void);
+void v3_flush_user_cache_range(unsigned long, unsigned long, unsigned int);
+void v3_coherent_kern_range(unsigned long, unsigned long);
+int v3_coherent_user_range(unsigned long, unsigned long);
+void v3_flush_kern_dcache_area(void *, size_t);
+void v3_dma_map_area(const void *, size_t, int);
+void v3_dma_unmap_area(const void *, size_t, int);
+void v3_dma_flush_range(const void *, const void *);
+
+struct cpu_cache_fns v3_cache_fns __initconst = {
+	.flush_icache_all = v3_flush_icache_all,
+	.flush_kern_all = v3_flush_kern_cache_all,
+	.flush_kern_louis = v3_flush_kern_cache_all,
+	.flush_user_all = v3_flush_user_cache_all,
+	.flush_user_range = v3_flush_user_cache_range,
+	.coherent_kern_range = v3_coherent_kern_range,
+	.coherent_user_range = v3_coherent_user_range,
+	.flush_kern_dcache_area = v3_flush_kern_dcache_area,
+	.dma_map_area = v3_dma_map_area,
+	.dma_unmap_area = v3_dma_unmap_area,
+	.dma_flush_range = v3_dma_flush_range,
+};
+#endif
+
 #ifdef CONFIG_CPU_CACHE_V4
 void v4_flush_icache_all(void);
 void v4_flush_kern_cache_all(void);

@@ -8,7 +8,9 @@ config ARCH_RPC
 	depends on MMU
 	select ARCH_ACORN
 	select ARCH_MAY_HAVE_PC_FDC
-	select CPU_SA110
+	# Keep StrongARM as the normal RiscPC default.  Selecting CPU_ARM610
+	# explicitly instead produces an ARMv3-only kernel for original cards.
+	select CPU_SA110 if !CPU_ARM610
 	select FIQ
 	select HAVE_PATA_PLATFORM
 	select ISA_DMA_API

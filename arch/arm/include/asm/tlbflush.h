@@ -15,6 +15,7 @@
 
 #include <asm/glue.h>
 
+#define TLB_V3_PAGE	(1 << 0)
 #define TLB_V4_U_PAGE	(1 << 1)
 #define TLB_V4_D_PAGE	(1 << 2)
 #define TLB_V4_I_PAGE	(1 << 3)
@@ -22,6 +23,7 @@
 #define TLB_V6_D_PAGE	(1 << 5)
 #define TLB_V6_I_PAGE	(1 << 6)
 
+#define TLB_V3_FULL	(1 << 8)
 #define TLB_V4_U_FULL	(1 << 9)
 #define TLB_V4_D_FULL	(1 << 10)
 #define TLB_V4_I_FULL	(1 << 11)
@@ -51,6 +53,7 @@
  *	=============
  *
  *	We have the following to choose from:
+ *	  v3    - ARMv3
  *	  v4    - ARMv4 without write buffer
  *	  v4wb  - ARMv4 with write buffer without I TLB flush entry instruction
  *	  v4wbi - ARMv4 with write buffer with I TLB flush entry instruction
@@ -64,6 +67,21 @@
 
 #ifdef CONFIG_SMP_ON_UP
 #define MULTI_TLB 1
+#endif
+
+#define v3_tlb_flags	(TLB_V3_FULL | TLB_V3_PAGE)
+
+#ifdef CONFIG_CPU_TLB_V3
+# define v3_possible_flags	v3_tlb_flags
+# define v3_always_flags	v3_tlb_flags
+# ifdef _TLB
+#  define MULTI_TLB 1
+# else
+#  define _TLB v3
+# endif
+#else
+# define v3_possible_flags	0
+# define v3_always_flags	(-1UL)
 #endif
 
 #define v4_tlb_flags	(TLB_V4_U_FULL | TLB_V4_U_PAGE)
@@ -280,7 +298,8 @@ extern struct cpu_tlb_fns cpu_tlb;
  * implemented the "%?" method, but this has been discontinued due to too
  * many people getting it wrong.
  */
-#define possible_tlb_flags	(v4_possible_flags | \
+#define possible_tlb_flags	(v3_possible_flags | \
+				 v4_possible_flags | \
 				 v4wbi_possible_flags | \
 				 fr_possible_flags | \
 				 v4wb_possible_flags | \
@@ -288,7 +307,8 @@ extern struct cpu_tlb_fns cpu_tlb;
 				 v6wbi_possible_flags | \
 				 v7wbi_possible_flags)
 
-#define always_tlb_flags	(v4_always_flags & \
+#define always_tlb_flags	(v3_always_flags & \
+				 v4_always_flags & \
 				 v4wbi_always_flags & \
 				 fr_always_flags & \
 				 v4wb_always_flags & \
@@ -318,6 +338,8 @@ static inline void __local_flush_tlb_all(void)
 	const int zero = 0;
 	const unsigned int __tlb_flag = __cpu_tlb_flags;
 
+	/* ARM610 c5 invalidates its unified TLB. */
+	tlb_op(TLB_V3_FULL, "c5, c0, 0", zero);
 	tlb_op(TLB_V4_U_FULL | TLB_V6_U_FULL, "c8, c7, 0", zero);
 	tlb_op(TLB_V4_D_FULL | TLB_V6_D_FULL, "c8, c6, 0", zero);
 	tlb_op(TLB_V4_I_FULL | TLB_V6_I_FULL, "c8, c5, 0", zero);
@@ -363,8 +385,9 @@ static inline void __local_flush_tlb_mm(struct mm_struct *mm)
 	const int asid = ASID(mm);
 	const unsigned int __tlb_flag = __cpu_tlb_flags;
 
-	if (possible_tlb_flags & (TLB_V4_U_FULL|TLB_V4_D_FULL|TLB_V4_I_FULL)) {
+	if (possible_tlb_flags & (TLB_V3_FULL|TLB_V4_U_FULL|TLB_V4_D_FULL|TLB_V4_I_FULL)) {
 		if (cpumask_test_cpu(smp_processor_id(), mm_cpumask(mm))) {
+			tlb_op(TLB_V3_FULL, "c5, c0, 0", zero);
 			tlb_op(TLB_V4_U_FULL, "c8, c7, 0", zero);
 			tlb_op(TLB_V4_D_FULL, "c8, c6, 0", zero);
 			tlb_op(TLB_V4_I_FULL, "c8, c5, 0", zero);
@@ -417,8 +440,9 @@ __local_flush_tlb_page(struct vm_area_struct *vma, unsigned long uaddr)
 
 	uaddr = (uaddr & PAGE_MASK) | ASID(vma->vm_mm);
 
-	if (possible_tlb_flags & (TLB_V4_U_PAGE|TLB_V4_D_PAGE|TLB_V4_I_PAGE|TLB_V4_I_FULL) &&
+	if (possible_tlb_flags & (TLB_V3_PAGE|TLB_V4_U_PAGE|TLB_V4_D_PAGE|TLB_V4_I_PAGE|TLB_V4_I_FULL) &&
 	    cpumask_test_cpu(smp_processor_id(), mm_cpumask(vma->vm_mm))) {
+		tlb_op(TLB_V3_PAGE, "c6, c0, 0", uaddr);
 		tlb_op(TLB_V4_U_PAGE, "c8, c7, 1", uaddr);
 		tlb_op(TLB_V4_D_PAGE, "c8, c6, 1", uaddr);
 		tlb_op(TLB_V4_I_PAGE, "c8, c5, 1", uaddr);
@@ -474,6 +498,8 @@ static inline void __local_flush_tlb_kernel_page(unsigned long kaddr)
 	const int zero = 0;
 	const unsigned int __tlb_flag = __cpu_tlb_flags;
 
+	/* ARM610 c6 purges the 4 KiB entry selected by the virtual address. */
+	tlb_op(TLB_V3_PAGE, "c6, c0, 0", kaddr);
 	tlb_op(TLB_V4_U_PAGE, "c8, c7, 1", kaddr);
 	tlb_op(TLB_V4_D_PAGE, "c8, c6, 1", kaddr);
 	tlb_op(TLB_V4_I_PAGE, "c8, c5, 1", kaddr);

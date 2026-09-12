@@ -17,8 +17,12 @@
 #define OF_DT_MAGIC 0xedfe0dd0
 #endif
 
+#ifdef CONFIG_CPU_32v3
+	.arch	armv3m
+#else
  AR_CLASS(	.arch	armv7-a	)
  M_CLASS(	.arch	armv7-m	)
+#endif
 
 /*
  * Debugging stuff
@@ -718,6 +722,25 @@ params:		ldr	r0, =0x10000100		@ params_phys for RPC
  * This routine must preserve:
  *  r4, r7, r8
  */
+
+#ifdef CONFIG_CPU_32v3
+/*
+ * The generic decompressor normally embeds cache routines for every ARM
+ * generation so that one zImage can boot many machines.  That is unsuitable
+ * for an ARMv3-only image: it leaves ARMv4+ instructions in executable
+ * sections.  Direct RiscPC boot starts with caches disabled, so retain the
+ * conservative cache-off path here.  The kernel establishes its own MMU and
+ * cache state after decompression.
+ */
+cache_on:
+	mov	pc, lr
+
+cache_off:
+	mov	pc, lr
+
+cache_clean_flush:
+	mov	pc, lr
+#else
 		.align	5
 cache_on:	mov	r3, #8			@ cache_on function
 		b	call_cache_fn
@@ -1334,6 +1357,7 @@ __armv3_mpu_cache_flush:
 		mov	r1, #0
 		mcr	p15, 0, r1, c7, c0, 0	@ invalidate whole cache v3
 		mov	pc, lr
+#endif /* CONFIG_CPU_32v3 */
 
 /*
  * Various debugging routines for printing hex characters and

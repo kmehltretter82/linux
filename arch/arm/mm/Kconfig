@@ -5,6 +5,21 @@ comment "Processor Type"
 # which CPUs we support in the kernel image, and the compiler instruction
 # optimiser behaviour.
 
+# ARM610
+config CPU_ARM610
+	bool "Support ARM610 processor" if ARCH_RPC
+	select CPU_32v3
+	select CPU_CACHE_V3
+	select CPU_CACHE_VIVT
+	select CPU_CP15_MMU
+	select CPU_COPY_V3 if MMU
+	select CPU_TLB_V3 if MMU
+	select CPU_PABRT_LEGACY
+	help
+	  The ARM610 is the original ARMv3 processor option for the Acorn
+	  RiscPC.  It has a pre-ARMv4 CP15 register layout and needs its own
+	  cache, TLB, and abort handling code.
+
 # ARM7TDMI
 config CPU_ARM7TDMI
 	bool
@@ -520,6 +535,9 @@ config CPU_PABRT_V7
 	bool
 
 # The cache model
+config CPU_CACHE_V3
+	bool
+
 config CPU_CACHE_V4
 	bool
 
@@ -552,6 +570,9 @@ config CPU_CACHE_V7M
 
 if MMU
 # The copy-page model
+config CPU_COPY_V3
+	bool
+
 config CPU_COPY_V4WT
 	bool
 
@@ -568,6 +589,11 @@ config CPU_COPY_V6
 	bool
 
 # This selects the TLB model
+config CPU_TLB_V3
+	bool
+	help
+	  ARM Architecture Version 3 TLB.
+
 config CPU_TLB_V4WT
 	bool
 	help

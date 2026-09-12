@@ -5,6 +5,18 @@
 #include <linux/types.h>
 #include <asm/tlbflush.h>
 
+#ifdef CONFIG_CPU_TLB_V3
+void v3_flush_user_tlb_range(unsigned long, unsigned long,
+				     struct vm_area_struct *);
+void v3_flush_kern_tlb_range(unsigned long, unsigned long);
+
+struct cpu_tlb_fns v3_tlb_fns __initconst = {
+	.flush_user_range	= v3_flush_user_tlb_range,
+	.flush_kern_range	= v3_flush_kern_tlb_range,
+	.tlb_flags		= v3_tlb_flags,
+};
+#endif
+
 #ifdef CONFIG_CPU_TLB_V4WT
 void v4_flush_user_tlb_range(unsigned long, unsigned long, struct vm_area_struct *);
 void v4_flush_kern_tlb_range(unsigned long, unsigned long);

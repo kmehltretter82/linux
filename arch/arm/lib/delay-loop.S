@@ -9,7 +9,7 @@
 #include <asm/assembler.h>
 #include <asm/delay.h>
 
-#ifdef CONFIG_ARCH_RPC
+#if defined(CONFIG_ARCH_RPC) && !defined(CONFIG_CPU_32v3)
 		.arch	armv4
 #endif
 

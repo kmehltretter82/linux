@@ -9,7 +9,9 @@ config ARCH_MULTI_V4
 	bool "ARMv4 based platforms (FA526, StrongARM)"
 	depends on !ARCH_MULTI_V6_V7
 	select ARCH_MULTI_V4_V5
-	select CPU_FA526 if !(CPU_SA110 || CPU_SA1100)
+	# ARCH_RPC also retains an ARMv3 ARM610 option.  It uses this legacy
+	# platform selector but must not acquire the FA526 ARMv4 fallback.
+	select CPU_FA526 if !(CPU_ARM610 || CPU_SA110 || CPU_SA1100)
 
 config ARCH_MULTI_V4T
 	bool "ARMv4T based platforms (ARM720T, ARM920T, ...)"

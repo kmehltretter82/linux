@@ -240,6 +240,16 @@ static int __get_cpu_architecture(void)
 {
 	int cpu_arch;
 
+	/*
+	 * ARM610 predates the architecture field decoded below.  Its MIDR is
+	 * 0x4156061x, which otherwise looks like an unknown pre-ARM7 format
+	 * despite being an ARMv3 processor.
+	 */
+#ifdef CONFIG_CPU_ARM610
+	if ((read_cpuid_id() & 0xfffffff0) == 0x41560610)
+		return CPU_ARCH_ARMv3;
+#endif
+
 	if ((read_cpuid_id() & 0x0008f000) == 0) {
 		cpu_arch = CPU_ARCH_UNKNOWN;
 	} else if ((read_cpuid_id() & 0x0008f000) == 0x00007000) {
