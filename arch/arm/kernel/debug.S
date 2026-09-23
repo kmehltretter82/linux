@@ -24,10 +24,23 @@
 #ifdef CONFIG_MMU
 		.macro	addruart_current, rx, tmp1, tmp2
 		addruart	\tmp1, \tmp2, \rx
+#ifdef CONFIG_CPU_32v3
+		/*
+		 * The ARM610 control register is write-only, so its MMU bit
+		 * cannot be used to select the physical or virtual UART.  ARMv3
+		 * kernels execute below PAGE_OFFSET before the MMU transition and
+		 * at PAGE_OFFSET or above afterwards.
+		 */
+		mov		\rx, pc
+		cmp		\rx, #CONFIG_PAGE_OFFSET
+		movlo		\rx, \tmp1
+		movhs		\rx, \tmp2
+#else
 		mrc		p15, 0, \rx, c1, c0
 		tst		\rx, #1
 		moveq		\rx, \tmp1
 		movne		\rx, \tmp2
+#endif
 		.endm
 
 #else /* !CONFIG_MMU */

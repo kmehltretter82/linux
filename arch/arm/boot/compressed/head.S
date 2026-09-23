@@ -18,7 +18,7 @@
 #endif
 
 #ifdef CONFIG_CPU_32v3
-	.arch	armv3m
+	.arch	armv3
 #else
  AR_CLASS(	.arch	armv7-a	)
  M_CLASS(	.arch	armv7-m	)

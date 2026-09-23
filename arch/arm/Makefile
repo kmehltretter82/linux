@@ -71,7 +71,7 @@ endif
 arch-$(CONFIG_CPU_32v5)		:=-march=armv5te
 arch-$(CONFIG_CPU_32v4T)	:=-march=armv4t
 arch-$(CONFIG_CPU_32v4)		:=-march=armv4
-arch-$(CONFIG_CPU_32v3)		:=-march=armv3m
+arch-$(CONFIG_CPU_32v3)		:=-march=armv3
 
 # Note that GCC does not numerically define an architecture version
 # macro, but instead defines a whole series of macros which makes
