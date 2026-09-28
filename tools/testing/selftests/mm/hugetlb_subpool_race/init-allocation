@@ -1,0 +1,76 @@
+#!/bin/busybox sh
+export PATH=/bin:/tests
+
+finish()
+{
+	echo "ALLOCPROOF-RESULT $1"
+	dmesg
+	echo "ALLOCPROOF-DONE $1"
+	sync
+	poweroff -f
+	while :; do sleep 60; done
+}
+
+fail()
+{
+	echo "ALLOCPROOF-FAIL $*"
+	finish FAIL
+}
+
+pool_snapshot()
+{
+	stage=$1
+	total=$(cat "$pool/nr_hugepages") || fail "read total at $stage"
+	free=$(cat "$pool/free_hugepages") || fail "read free at $stage"
+	reserved=$(cat "$pool/resv_hugepages") || fail "read reserved at $stage"
+	surplus=$(cat "$pool/surplus_hugepages") || fail "read surplus at $stage"
+	echo "ALLOCPROOF-POOL stage=$stage total=$total free=$free reserved=$reserved surplus=$surplus"
+}
+
+mount -t proc proc /proc || fail "mount proc"
+mount -t sysfs sysfs /sys || fail "mount sysfs"
+mount -t devtmpfs devtmpfs /dev || fail "mount devtmpfs"
+mount -t tmpfs tmpfs /tmp || fail "mount tmpfs"
+mkdir -p /sys/kernel/debug /mnt/main /mnt/steal
+mount -t debugfs debugfs /sys/kernel/debug || fail "mount debugfs"
+
+requested_cpus=$(sed -n 's/.*allocproof_cpus=\([14]\).*/\1/p' /proc/cmdline)
+active_cpus=$(grep -c '^processor[[:space:]]*:' /proc/cpuinfo)
+[ "$active_cpus" = "$requested_cpus" ] || fail "CPU count requested=$requested_cpus active=$active_cpus"
+huge_kb=$(awk '/^Hugepagesize:/ {print $2}' /proc/meminfo)
+case "$huge_kb" in ''|*[!0-9]*) fail "invalid huge page size" ;; esac
+hpage=$((huge_kb * 1024))
+pool=/sys/kernel/mm/hugepages/hugepages-${huge_kb}kB
+debug_dir=/sys/kernel/debug/hugetlb_p4_test
+[ -d "$pool" ] || fail "missing hstate directory"
+[ -d "$debug_dir" ] || fail "missing test instrumentation"
+[ "$(cat "$pool/nr_hugepages")" = 7 ] || fail "requires exactly seven huge pages"
+[ "$(cat "$debug_dir/patch4_present")" = 1 ] || fail "requires full-v3 instrumentation base"
+echo 0 > "$pool/nr_overcommit_hugepages" || fail "disable overcommit"
+
+echo "ALLOCPROOF-BOOT cpus=$active_cpus hpage=$hpage $(uname -a)"
+cat /etc/test-provenance || fail "read provenance"
+pool_snapshot initial
+mount -t hugetlbfs -o "pagesize=$hpage,min_size=$((4 * hpage))" none /mnt/main || fail "mount main"
+mount -t hugetlbfs -o "pagesize=$hpage" none /mnt/steal || fail "mount steal"
+pool_snapshot mounted
+
+/tests/allocation-cleanup-proof /mnt/main/target /mnt/main/hold \
+	/mnt/steal/fill1 /mnt/steal/fill2 "$hpage" "$pool" "$debug_dir" || \
+	fail "proof helper"
+pool_snapshot helper-complete
+
+umount /mnt/steal || fail "unmount steal"
+umount /mnt/main || fail "unmount main"
+pool_snapshot unmounted
+[ "$(cat "$pool/free_hugepages")" = 7 ] || fail "free pages not restored"
+unmounted_reserved=$(cat "$pool/resv_hugepages") || fail "read unmounted reservations"
+[ "$unmounted_reserved" = 18446744073709551615 ] || fail "one-page underflow not observed"
+echo "ALLOCPROOF-UNMOUNT-CHECK reserved=$unmounted_reserved expected=ULONG_MAX result=PASS"
+[ "$(cat "$debug_dir/fail_hits")" = 0 ] || fail "unexpected region-allocation fault"
+[ "$(cat "$debug_dir/timed_out")" = 0 ] || fail "kernel synchronization timeout"
+
+if dmesg | grep -E 'BUG:|WARNING:|Oops:|Kernel panic|KASAN:|UBSAN:|Bad page'; then
+	fail "kernel diagnostic present"
+fi
+finish PASS

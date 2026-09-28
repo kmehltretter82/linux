@@ -1,0 +1,121 @@
+Deterministic HugeTLB subpool rollback race reproducers
+=======================================================
+
+WARNING: TEST-ONLY KERNEL BRANCH
+
+This directory and the CONFIG_HUGETLB_P4_TEST instrumentation in this
+commit are for reproducing two accounting bugs in the exact v3 HugeTLB
+subpool series.  Do not enable the instrumentation in a production kernel.
+The parent of this commit is the full v3 series at:
+
+  a73701d8e7667015c956581eb80659aaff8ef6de
+
+No production fix is included.
+
+Why kernel instrumentation is required
+--------------------------------------
+
+The races require another operation to run in two narrow windows inside
+the kernel.  A default-off debugfs hook selects one PID and pauses it:
+
+  1. after hugepage_subpool_get_pages(); and
+  2. after global accounting or folio allocation fails, before rollback.
+
+Userspace then releases and consumes reservation capacity before allowing
+the target to continue.  This makes the otherwise timing-dependent races
+deterministic.  The region_add() fault-injection switch inherited from the
+original patch-4 test remains disabled in these tests; fail_hits must remain
+zero.
+
+Tests
+-----
+
+reservation
+  Exercises the early out_put_pages rollback in hugetlb_reserve_pages().
+  The ignored positive correction is +2 and returns -ENOMEM.  After file
+  cleanup only two reservations back a four-page minimum; unmount produces
+  ULONG_MAX - 1.
+
+allocation
+  Exercises out_subpool_put after alloc_hugetlb_folio() fails.  The ignored
+  positive correction is +1 and returns -ENOMEM.  After file cleanup only
+  three reservations back a four-page minimum; unmount produces ULONG_MAX.
+
+Both tests require a fresh boot with exactly seven 2 MiB huge pages and no
+overcommit.  Run each test separately; the expected counter underflow makes
+the guest unsuitable for further testing after it completes.
+
+Files
+-----
+
+  early-cleanup-proof.c       reservation userspace controller
+  allocation-cleanup-proof.c allocation userspace controller
+  init-reservation            minimal guest init for reservation test
+  init-allocation             minimal guest init for allocation test
+  validate-reservation.py     exact-value console validator
+  validate-allocation.py      exact-value console validator
+  mk-initramfs.sh             creates a reproducible BusyBox initramfs
+  run-qemu.sh                 boots QEMU and runs the matching validator
+
+Build the instrumented kernel
+-----------------------------
+
+Starting from the repository root, for example:
+
+  mkdir -p build
+  make O=build x86_64_defconfig
+  scripts/config --file build/.config \
+    -e HUGETLBFS -e DEBUG_FS -e HUGETLB_P4_TEST \
+    -e BLK_DEV_INITRD -e DEVTMPFS
+  make O=build olddefconfig
+  make O=build -j4 bzImage usr/gen_init_cpio
+
+Confirm that build/.config contains:
+
+  CONFIG_HUGETLBFS=y
+  CONFIG_DEBUG_FS=y
+  CONFIG_HUGETLB_P4_TEST=y
+
+Build the controllers and initramfses
+-------------------------------------
+
+A statically linked BusyBox is required.  From this directory:
+
+  make LDFLAGS=-static
+
+  ./mk-initramfs.sh reservation /path/to/busybox \
+    /path/to/linux/build/usr/gen_init_cpio /tmp/reservation.cpio.gz
+
+  ./mk-initramfs.sh allocation /path/to/busybox \
+    /path/to/linux/build/usr/gen_init_cpio /tmp/allocation.cpio.gz
+
+The script verifies that the selected controller is statically linked.
+
+Run
+---
+
+Run each case at one or four vCPUs.  The runner uses TCG and validates the
+retained console after the guest powers off:
+
+  ./run-qemu.sh reservation \
+    /path/to/linux/build/arch/x86/boot/bzImage \
+    /tmp/reservation.cpio.gz 1 /tmp/reservation-smp1.log
+
+  ./run-qemu.sh allocation \
+    /path/to/linux/build/arch/x86/boot/bzImage \
+    /tmp/allocation.cpio.gz 4 /tmp/allocation-smp4.log
+
+Successful reproduction ends with validator JSON containing
+"result": "PASS".  Here PASS means that the expected full-v3 accounting
+bug was reproduced, not that the kernel is correct.
+
+Expected observations
+---------------------
+
+                    correction       after files       after unmount
+  reservation       +2, -ENOMEM      2                 ULONG_MAX - 1
+  allocation        +1, -ENOMEM      3                 ULONG_MAX
+
+The same results were retained from fresh one- and four-vCPU QEMU boots for
+each case.  The hooks select only the requested target PID and include a
+30-second in-kernel timeout so a controller failure does not wait forever.

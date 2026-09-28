@@ -34,6 +34,10 @@
 #include <linux/migrate.h>
 #include <linux/nospec.h>
 #include <linux/delayacct.h>
+#ifdef CONFIG_HUGETLB_P4_TEST
+#include <linux/debugfs.h>
+#include <linux/delay.h>
+#endif
 #include <linux/memory.h>
 #include <linux/mm_inline.h>
 #include <linux/padata.h>
@@ -125,6 +129,139 @@ static int __huge_pmd_unshare(struct mmu_gather *tlb,
 static void hugetlb_unshare_pmds(struct vm_area_struct *vma,
 		unsigned long start, unsigned long end, bool take_locks);
 static struct resv_map *vma_resv_map(struct vm_area_struct *vma);
+
+#ifdef CONFIG_HUGETLB_P4_TEST
+/*
+ * Test-only orchestration for the patch-4 region_add() failure path.
+ * A userspace controller selects one task, advances two synchronization
+ * points through debugfs, and requests one extra file_region allocation
+ * failure.  Keep this behind its dedicated, default-off Kconfig option.
+ */
+static u32 hugetlb_p4test_target_pid;
+static u32 hugetlb_p4test_stage;
+static u32 hugetlb_p4test_release;
+static u32 hugetlb_p4test_fail_once;
+static u32 hugetlb_p4test_fail_hits;
+static u32 hugetlb_p4test_timed_out;
+static u32 hugetlb_p4test_patch4_present = 1;
+
+static bool hugetlb_p4test_is_target(void)
+{
+	return READ_ONCE(hugetlb_p4test_target_pid) == task_pid_nr(current);
+}
+
+static void hugetlb_p4test_pool_snapshot(struct hstate *h,
+		struct hugepage_subpool *spool, unsigned long *total,
+		unsigned long *free, unsigned long *resv, long *used,
+		long *subpool_resv)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&hugetlb_lock, flags);
+	*total = h->nr_huge_pages;
+	*free = h->free_huge_pages;
+	*resv = h->resv_huge_pages;
+	spin_unlock_irqrestore(&hugetlb_lock, flags);
+
+	*used = -1;
+	*subpool_resv = -1;
+	if (!spool)
+		return;
+
+	spin_lock_irqsave(&spool->lock, flags);
+	*used = spool->used_hpages;
+	*subpool_resv = spool->rsv_hpages;
+	spin_unlock_irqrestore(&spool->lock, flags);
+}
+
+static void hugetlb_p4test_pause(u32 stage, struct hstate *h,
+		struct hugepage_subpool *spool, long chg, long gbl_resv_get,
+		long gbl_resv_accounted)
+{
+	unsigned long total, free, resv;
+	long used, subpool_resv;
+	int i;
+
+	if (!hugetlb_p4test_is_target())
+		return;
+
+	hugetlb_p4test_pool_snapshot(h, spool, &total, &free, &resv, &used,
+				     &subpool_resv);
+	WRITE_ONCE(hugetlb_p4test_stage, stage);
+	pr_info("hugetlb-p4-test: pause stage=%u pid=%d chg=%ld get=%ld accounted=%ld total=%lu free=%lu resv=%lu used=%ld subpool_resv=%ld\n",
+		stage, task_pid_nr(current), chg, gbl_resv_get,
+		gbl_resv_accounted, total, free, resv, used, subpool_resv);
+
+	for (i = 0; i < 6000; i++) {
+		if (READ_ONCE(hugetlb_p4test_release) >= stage) {
+			pr_info("hugetlb-p4-test: resume stage=%u pid=%d\n",
+				stage, task_pid_nr(current));
+			return;
+		}
+		msleep(10);
+	}
+
+	WRITE_ONCE(hugetlb_p4test_timed_out, 1);
+	pr_err("hugetlb-p4-test: timeout stage=%u pid=%d\n", stage,
+		task_pid_nr(current));
+}
+
+static bool hugetlb_p4test_fail_region_alloc(int to_allocate)
+{
+	if (!hugetlb_p4test_is_target() ||
+	    READ_ONCE(hugetlb_p4test_fail_once) != 1)
+		return false;
+
+	WRITE_ONCE(hugetlb_p4test_fail_once, 0);
+	WRITE_ONCE(hugetlb_p4test_fail_hits,
+		   READ_ONCE(hugetlb_p4test_fail_hits) + 1);
+	pr_info("hugetlb-p4-test: injected file_region allocation failure pid=%d count=%d\n",
+		task_pid_nr(current), to_allocate);
+	return true;
+}
+
+static void hugetlb_p4test_cleanup(struct hstate *h,
+		struct hugepage_subpool *spool, long chg, long gbl_resv_get,
+		long gbl_resv_put, long gbl_resv_accounted)
+{
+	unsigned long total, free, resv;
+	long used, subpool_resv;
+	long delta = gbl_resv_get - gbl_resv_put - gbl_resv_accounted;
+	int ret;
+
+	ret = hugetlb_acct_memory(h, delta);
+	if (!hugetlb_p4test_is_target())
+		return;
+	hugetlb_p4test_pool_snapshot(h, spool, &total, &free, &resv, &used,
+				     &subpool_resv);
+	pr_info("hugetlb-p4-test: cleanup pid=%d chg=%ld get=%ld put=%ld accounted=%ld delta=%ld ret=%d total=%lu free=%lu resv=%lu used=%ld subpool_resv=%ld\n",
+		task_pid_nr(current), chg, gbl_resv_get, gbl_resv_put,
+		gbl_resv_accounted, delta, ret, total, free, resv, used,
+		subpool_resv);
+	WRITE_ONCE(hugetlb_p4test_stage, 3);
+}
+
+static int __init hugetlb_p4test_init(void)
+{
+	struct dentry *dir;
+
+	dir = debugfs_create_dir("hugetlb_p4_test", NULL);
+	debugfs_create_u32("target_pid", 0600, dir,
+			   &hugetlb_p4test_target_pid);
+	debugfs_create_u32("stage", 0400, dir, &hugetlb_p4test_stage);
+	debugfs_create_u32("release", 0600, dir, &hugetlb_p4test_release);
+	debugfs_create_u32("fail_once", 0600, dir,
+			   &hugetlb_p4test_fail_once);
+	debugfs_create_u32("fail_hits", 0400, dir,
+			   &hugetlb_p4test_fail_hits);
+	debugfs_create_u32("timed_out", 0400, dir,
+			   &hugetlb_p4test_timed_out);
+	debugfs_create_u32("patch4_present", 0400, dir,
+			   &hugetlb_p4test_patch4_present);
+	return 0;
+}
+late_initcall(hugetlb_p4test_init);
+#endif
 
 static inline bool subpool_is_free(struct hugepage_subpool *spool)
 {
@@ -703,6 +840,10 @@ static int allocate_file_region_entries(struct resv_map *resv,
 		VM_BUG_ON(resv->region_cache_count < resv->adds_in_progress);
 
 		spin_unlock(&resv->lock);
+#ifdef CONFIG_HUGETLB_P4_TEST
+		if (hugetlb_p4test_fail_region_alloc(to_allocate))
+			goto out_of_memory;
+#endif
 		for (i = 0; i < to_allocate; i++) {
 			trg = kmalloc_obj(*trg);
 			if (!trg)
@@ -3001,6 +3142,9 @@ struct folio *alloc_hugetlb_folio(struct vm_area_struct *vma,
 			ret = -ENOSPC;
 			goto out_end_reservation;
 		}
+#ifdef CONFIG_HUGETLB_P4_TEST
+		hugetlb_p4test_pause(1, h, spool, 1, gbl_resv_get, 0);
+#endif
 	} else {
 		/*
 		 * If we have the vma reservation ready, no need for extra
@@ -3041,6 +3185,10 @@ struct folio *alloc_hugetlb_folio(struct vm_area_struct *vma,
 
 	if (IS_ERR(folio)) {
 		ret = PTR_ERR(folio);
+#ifdef CONFIG_HUGETLB_P4_TEST
+		if (map_chg)
+			hugetlb_p4test_pause(2, h, spool, 1, gbl_resv_get, 0);
+#endif
 		goto out_subpool_put;
 	}
 
@@ -3077,7 +3225,12 @@ out_subpool_put:
 	if (map_chg) {
 		long gbl_resv_put = hugepage_subpool_put_pages(spool, 1);
 
+#ifdef CONFIG_HUGETLB_P4_TEST
+		hugetlb_p4test_cleanup(h, spool, 1, gbl_resv_get, gbl_resv_put,
+				       0);
+#else
 		hugetlb_acct_memory(h, gbl_resv_get - gbl_resv_put);
+#endif
 	}
 
 out_end_reservation:
@@ -6761,14 +6914,25 @@ long hugetlb_reserve_pages(struct inode *inode,
 		err = gbl_resv_get;
 		goto out_uncharge_cgroup;
 	}
+#ifdef CONFIG_HUGETLB_P4_TEST
+	if ((!vma || vma_test(vma, VMA_MAYSHARE_BIT)) && to - from > 1)
+		hugetlb_p4test_pause(1, h, spool, chg, gbl_resv_get, 0);
+#endif
 
 	/*
 	 * Check enough hugepages are available for the reservation.
 	 * Hand the pages back to the subpool if there are not
 	 */
 	err = hugetlb_acct_memory(h, gbl_resv_get);
-	if (err < 0)
+	if (err < 0) {
+#ifdef CONFIG_HUGETLB_P4_TEST
+		if ((!vma || vma_test(vma, VMA_MAYSHARE_BIT)) &&
+		    to - from > 1)
+			hugetlb_p4test_pause(2, h, spool, chg, gbl_resv_get,
+					     0);
+#endif
 		goto out_put_pages;
+	}
 	gbl_resv_accounted = gbl_resv_get;
 
 	/*
@@ -6786,6 +6950,10 @@ long hugetlb_reserve_pages(struct inode *inode,
 		add = region_add(resv_map, from, to, regions_needed, h, h_cg);
 
 		if (unlikely(add < 0)) {
+#ifdef CONFIG_HUGETLB_P4_TEST
+			hugetlb_p4test_pause(2, h, spool, chg, gbl_resv_get,
+					     gbl_resv_accounted);
+#endif
 			err = add;
 			goto out_put_pages;
 		} else if (unlikely(chg > add)) {
@@ -6830,7 +6998,12 @@ long hugetlb_reserve_pages(struct inode *inode,
 	 * restore the difference, taking into account any global
 	 * reservations already acquired.
 	 */
+#ifdef CONFIG_HUGETLB_P4_TEST
+	hugetlb_p4test_cleanup(h, spool, chg, gbl_resv_get, gbl_resv_put,
+			       gbl_resv_accounted);
+#else
 	hugetlb_acct_memory(h, gbl_resv_get - gbl_resv_put - gbl_resv_accounted);
+#endif
 
 out_uncharge_cgroup:
 	hugetlb_cgroup_uncharge_cgroup_rsvd(hstate_index(h),

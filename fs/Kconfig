@@ -274,6 +274,14 @@ config HUGETLB_PAGE
 	def_bool HUGETLBFS
 	select XARRAY_MULTI
 
+config HUGETLB_P4_TEST
+	bool "Test-only HugeTLB region_add failure orchestration"
+	depends on HUGETLB_PAGE && DEBUG_FS
+	help
+	  Enable deterministic synchronization and fault-injection hooks used
+	  only to validate the region_add() failure accounting path.  This is
+	  test instrumentation and must not be enabled in production kernels.
+
 config HUGETLB_PAGE_OPTIMIZE_VMEMMAP
 	def_bool HUGETLB_PAGE
 	depends on ARCH_WANT_OPTIMIZE_HUGETLB_VMEMMAP
