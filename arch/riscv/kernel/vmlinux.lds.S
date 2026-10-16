@@ -168,7 +168,23 @@ SECTIONS
 	DWARF_DEBUG
 	MODINFO
 	ELF_DETAILS
+
 	.riscv.attributes 0 : { *(.riscv.attributes) }
+
+	/*
+	 * Retain compiler/assembler IRQ-site records in vmlinux for the
+	 * host-side decoder.  INFO keeps this metadata out of the runtime
+	 * address space, so enabling the map cannot move loadable sections.
+	 */
+	.riscv.linux_irq_sites 0 (INFO) : {
+		KEEP(*(.riscv.linux_irq_sites))
+	}
+	.riscv.linux_irq_c_sites 0 (INFO) : {
+		KEEP(*(.riscv.linux_irq_c_sites))
+	}
+	.riscv.linux_irq_expected 0 (INFO) : {
+		KEEP(*(.riscv.linux_irq_expected))
+	}
 
 	DISCARDS
 }
