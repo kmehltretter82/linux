@@ -1,0 +1,13 @@
+digraph state_automaton {
+	center = true;
+	size = "7,11";
+	{node [shape = plaintext, style=invis, label=""] "__init_consistent"};
+	{node [shape = doublecircle] "consistent"};
+	"__init_consistent" -> "consistent";
+	"consistent" [label = "consistent", color = green3];
+	"consistent" -> "consistent" [ label = "hardirq_entry;hardirq > 0\nhardirq_exit;hardirq > 0\nsoftirq_entry;serving_softirq == 1\nsoftirq_exit;serving_softirq == 1\nschedule_entry;hardirq == 0" ];
+	{ rank = min ;
+		"__init_consistent";
+		"consistent";
+	}
+}
