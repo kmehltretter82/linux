@@ -5,6 +5,8 @@
 #include <linux/kernel.h>
 #include <linux/rv.h>
 #include <rv/kunit.h>
+#include <trace/events/irq.h>
+#include <trace/events/sched.h>
 
 #include "irqstate_kunit.h"
 
