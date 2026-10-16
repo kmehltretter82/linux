@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0
+#include <linux/completion.h>
 #include <linux/hardirq.h>
 #include <linux/interrupt.h>
 #include <linux/irqflags.h>
+#include <linux/jiffies.h>
 #include <linux/kernel.h>
 #include <linux/rv.h>
 #include <rv/kunit.h>
@@ -11,6 +13,35 @@
 #include "irqstate_kunit.h"
 
 #if IS_REACHABLE(CONFIG_RV_MON_IRQSTATE)
+
+struct irqstate_softirq_ctx {
+	struct tasklet_struct tasklet;
+	struct completion done;
+};
+
+static void run_irqstate_softirq(struct tasklet_struct *tasklet)
+{
+	struct irqstate_softirq_ctx *softirq_ctx;
+
+	softirq_ctx = from_tasklet(softirq_ctx, tasklet, tasklet);
+	rv_irqstate_ops.handle_softirq_entry(NULL, 0);
+	rv_irqstate_ops.handle_softirq_exit(NULL, 0);
+	complete(&softirq_ctx->done);
+}
+
+static bool exercise_irqstate_softirq(void)
+{
+	struct irqstate_softirq_ctx softirq_ctx;
+	unsigned long completed;
+
+	init_completion(&softirq_ctx.done);
+	tasklet_setup(&softirq_ctx.tasklet, run_irqstate_softirq);
+	tasklet_schedule(&softirq_ctx.tasklet);
+	completed = wait_for_completion_timeout(&softirq_ctx.done, HZ);
+	tasklet_kill(&softirq_ctx.tasklet);
+
+	return completed != 0;
+}
 
 static void detach_irqstate_test_probes(void *unused)
 {
@@ -26,7 +57,6 @@ static void rv_test_irqstate(struct kunit *test)
 	unsigned long flags;
 
 	prepare_test(test, &rv_irqstate_ops.mon);
-	guard(migrate)();
 
 	/* Scheduling from task context is valid. */
 	rv_irqstate_ops.handle_schedule_entry(NULL, false);
@@ -43,6 +73,14 @@ static void rv_test_irqstate(struct kunit *test)
 		rv_irqstate_ops.handle_softirq_entry(NULL, 0);
 	RV_KUNIT_EXPECT_REACTION_HERE(test, ctx)
 		rv_irqstate_ops.handle_softirq_exit(NULL, 0);
+
+	/* Disabling BH does not mean that a softirq is being served. */
+	local_bh_disable();
+	RV_KUNIT_EXPECT_REACTION_HERE(test, ctx)
+		rv_irqstate_ops.handle_softirq_entry(NULL, 0);
+	RV_KUNIT_EXPECT_REACTION_HERE(test, ctx)
+		rv_irqstate_ops.handle_softirq_exit(NULL, 0);
+	local_bh_enable();
 
 	local_irq_save(flags);
 	__irq_enter_raw();
@@ -68,12 +106,9 @@ static void rv_test_irqstate(struct kunit *test)
 	__nmi_exit();
 	local_irq_restore(flags);
 
-	/* SOFTIRQ_OFFSET denotes execution, unlike BH-disable nesting. */
-	__local_bh_disable_ip(_THIS_IP_, SOFTIRQ_OFFSET);
-	rv_irqstate_ops.handle_softirq_entry(NULL, 0);
-	rv_irqstate_ops.handle_softirq_exit(NULL, 0);
+	/* Run the handlers from a real serving-softirq context. */
+	KUNIT_ASSERT_TRUE(test, exercise_irqstate_softirq());
 	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
-	__local_bh_enable_ip(_THIS_IP_, SOFTIRQ_OFFSET);
 
 	/* Exercise the actual generic tracepoint attachments as well. */
 	rv_irqstate_ops.attach();
@@ -87,6 +122,13 @@ static void rv_test_irqstate(struct kunit *test)
 	RV_KUNIT_EXPECT_REACTION_HERE(test, ctx)
 		trace_irq_handler_entry(0, &action);
 
+	local_bh_disable();
+	RV_KUNIT_EXPECT_REACTION_HERE(test, ctx)
+		trace_softirq_entry(0);
+	RV_KUNIT_EXPECT_REACTION_HERE(test, ctx)
+		trace_softirq_exit(0);
+	local_bh_enable();
+
 	local_irq_save(flags);
 	__irq_enter_raw();
 	trace_irq_handler_entry(0, &action);
@@ -95,11 +137,9 @@ static void rv_test_irqstate(struct kunit *test)
 	__irq_exit_raw();
 	local_irq_restore(flags);
 
-	__local_bh_disable_ip(_THIS_IP_, SOFTIRQ_OFFSET);
-	trace_softirq_entry(0);
-	trace_softirq_exit(0);
+	/* This also exercises the attached generic softirq tracepoints. */
+	KUNIT_ASSERT_TRUE(test, exercise_irqstate_softirq());
 	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
-	__local_bh_enable_ip(_THIS_IP_, SOFTIRQ_OFFSET);
 }
 
 #else
