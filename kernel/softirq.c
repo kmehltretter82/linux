@@ -27,6 +27,7 @@
 #include <linux/smpboot.h>
 #include <linux/tick.h>
 #include <linux/irq.h>
+#include <linux/irq-site.h>
 #include <linux/wait_bit.h>
 #include <linux/workqueue.h>
 
@@ -672,6 +673,7 @@ restart:
 	lockdep_softirq_end(in_hardirq);
 	softirq_handle_end();
 	current_restore_flags(old_flags, PF_MEMALLOC);
+	linux_irq_site(LINUX_IRQ_SITE_SOFTIRQ_EXIT, 0);
 }
 
 asmlinkage __visible void __softirq_entry __do_softirq(void)

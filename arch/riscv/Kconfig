@@ -929,6 +929,9 @@ config IRQ_STACKS
 	  Add independent irq & softirq stacks for percpu to prevent kernel stack
 	  overflows. We may save some memory footprint by disabling IRQ_STACKS.
 
+config CC_HAS_RISCV_LINUX_IRQ_SITE
+	def_bool $(success,echo 'void f(void) { __builtin_riscv_linux_irq_site(1$(comma) 0); }' | $(CC) $(CLANG_FLAGS) -Werror -fsyntax-only -x c -)
+
 config THREAD_SIZE_ORDER
 	int "Kernel stack size (in power-of-two numbers of page size)" if VMAP_STACK && EXPERT
 	range 0 4
