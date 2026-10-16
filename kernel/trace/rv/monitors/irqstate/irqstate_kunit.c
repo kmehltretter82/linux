@@ -48,6 +48,15 @@ static void rv_test_irqstate(struct kunit *test)
 	__irq_exit_raw();
 	local_irq_restore(flags);
 
+	/* Generic NMI accounting also carries a hardirq component. */
+	local_irq_save(flags);
+	__nmi_enter();
+	rv_irqstate_ops.handle_hardirq_entry(NULL, 0, NULL);
+	rv_irqstate_ops.handle_hardirq_exit(NULL, 0, NULL, 0);
+	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
+	__nmi_exit();
+	local_irq_restore(flags);
+
 	/* SOFTIRQ_OFFSET denotes execution, unlike BH-disable nesting. */
 	__local_bh_disable_ip(_THIS_IP_, SOFTIRQ_OFFSET);
 	rv_irqstate_ops.handle_softirq_entry(NULL, 0);
