@@ -52,6 +52,11 @@ actual softirq execution from a task which merely disabled bottom halves.  The
 hardirq condition uses the hardirq component of ``preempt_count`` and is valid
 for PREEMPT_RT as well as non-RT kernels.
 
+NMI-capable IRQ paths can emit the same IRQ-handler tracepoints.  Generic NMI
+entry accounting adds ``HARDIRQ_OFFSET`` together with ``NMI_OFFSET``, so those
+events satisfy the hardirq guard without an architecture-specific exception.
+The monitor does not otherwise attempt to model NMI entry and exit.
+
 The model is a one-state hybrid automaton.  Every event is a self-transition
 guarded by the required execution context.  A false guard invokes the selected
 RV reactor and emits the monitor's environment-error trace event.
