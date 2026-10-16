@@ -11,6 +11,8 @@ struct irqaction;
 
 extern const struct rv_irqstate_ops {
 	struct rv_kunit_mon mon;
+	void (*attach)(void);
+	void (*detach)(void);
 	void (*handle_hardirq_entry)(void *data, int irq,
 				     struct irqaction *action);
 	void (*handle_hardirq_exit)(void *data, int irq,

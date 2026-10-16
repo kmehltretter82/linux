@@ -85,6 +85,24 @@ static void handle_softirq_exit(void *data, unsigned int vec_nr)
 	da_handle_start_run_event(softirq_exit_irqstate);
 }
 
+static void attach_irqstate(void)
+{
+	rv_attach_trace_probe("irqstate", irq_handler_entry, handle_hardirq_entry);
+	rv_attach_trace_probe("irqstate", irq_handler_exit, handle_hardirq_exit);
+	rv_attach_trace_probe("irqstate", sched_entry_tp, handle_schedule_entry);
+	rv_attach_trace_probe("irqstate", softirq_entry, handle_softirq_entry);
+	rv_attach_trace_probe("irqstate", softirq_exit, handle_softirq_exit);
+}
+
+static void detach_irqstate(void)
+{
+	rv_detach_trace_probe("irqstate", irq_handler_entry, handle_hardirq_entry);
+	rv_detach_trace_probe("irqstate", irq_handler_exit, handle_hardirq_exit);
+	rv_detach_trace_probe("irqstate", sched_entry_tp, handle_schedule_entry);
+	rv_detach_trace_probe("irqstate", softirq_entry, handle_softirq_entry);
+	rv_detach_trace_probe("irqstate", softirq_exit, handle_softirq_exit);
+}
+
 static int enable_irqstate(void)
 {
 	int retval;
@@ -93,11 +111,7 @@ static int enable_irqstate(void)
 	if (retval)
 		return retval;
 
-	rv_attach_trace_probe("irqstate", irq_handler_entry, handle_hardirq_entry);
-	rv_attach_trace_probe("irqstate", irq_handler_exit, handle_hardirq_exit);
-	rv_attach_trace_probe("irqstate", sched_entry_tp, handle_schedule_entry);
-	rv_attach_trace_probe("irqstate", softirq_entry, handle_softirq_entry);
-	rv_attach_trace_probe("irqstate", softirq_exit, handle_softirq_exit);
+	attach_irqstate();
 
 	return 0;
 }
@@ -106,11 +120,7 @@ static void disable_irqstate(void)
 {
 	rv_this.enabled = 0;
 
-	rv_detach_trace_probe("irqstate", irq_handler_entry, handle_hardirq_entry);
-	rv_detach_trace_probe("irqstate", irq_handler_exit, handle_hardirq_exit);
-	rv_detach_trace_probe("irqstate", sched_entry_tp, handle_schedule_entry);
-	rv_detach_trace_probe("irqstate", softirq_entry, handle_softirq_entry);
-	rv_detach_trace_probe("irqstate", softirq_exit, handle_softirq_exit);
+	detach_irqstate();
 
 	ha_monitor_destroy();
 }
@@ -147,6 +157,8 @@ MODULE_DESCRIPTION("irqstate: verify IRQ event and execution context agreement")
 
 const struct rv_irqstate_ops rv_irqstate_ops = {
 	.mon = RV_MON_OPS_INIT(),
+	.attach = attach_irqstate,
+	.detach = detach_irqstate,
 	.handle_hardirq_entry = handle_hardirq_entry,
 	.handle_hardirq_exit = handle_hardirq_exit,
 	.handle_schedule_entry = handle_schedule_entry,
