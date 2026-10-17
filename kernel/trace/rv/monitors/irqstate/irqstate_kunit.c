@@ -423,9 +423,135 @@ static void rv_test_irqstate_preempt(struct kunit *test)
 	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
 }
 
+/* An RT serving interval starts before handle_softirqs() is entered. */
+static void rv_test_irqstate_rt_prepare_irq(struct kunit *test)
+{
+	struct rv_kunit_ctx *ctx = test->priv;
+	unsigned int saved_count, saved_softirq;
+	unsigned long flags;
+	bool serving;
+
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT)) {
+		kunit_skip(test, "Requires RT serving-softirq accounting");
+		return;
+	}
+
+	prepare_test(test, &rv_irqstate_ops.mon);
+	guard(migrate)();
+	attach_irqstate_test_probes();
+	KUNIT_ASSERT_EQ(test, 0,
+			kunit_add_action_or_reset(test, detach_irqstate_test_probes,
+						  NULL));
+	saved_count = preempt_count();
+	saved_softirq = softirq_count();
+
+	/*
+	 * Keep an outer BH-disable reference so the matching enable of the
+	 * serving reference cannot dispatch pending softirqs. Both references
+	 * use the real RT helpers; no task or per-CPU counter is fabricated.
+	 */
+	local_bh_disable();
+	local_irq_save(flags);
+	irq_enter_rcu();
+	irq_exit_rcu();
+	local_irq_restore(flags);
+
+	/* The same serving-bit transition used by ksoftirqd_run_begin(). */
+	__local_bh_disable_ip(_RET_IP_, SOFTIRQ_OFFSET);
+	serving = !!in_serving_softirq();
+	local_irq_save(flags);
+	irq_enter_rcu();
+	irq_exit_rcu();
+	local_irq_restore(flags);
+	__local_bh_enable_ip(_RET_IP_, SOFTIRQ_OFFSET);
+	local_bh_enable();
+
+	KUNIT_EXPECT_TRUE(test, serving);
+	KUNIT_EXPECT_EQ(test, preempt_count(), saved_count);
+	KUNIT_EXPECT_EQ(test, softirq_count(), saved_softirq);
+	kunit_info(test, "RT preparation IRQ serving=%u restored=%u\n",
+		   serving, preempt_count() == saved_count &&
+		   softirq_count() == saved_softirq);
+	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
+	local_irq_save(flags);
+	__irq_enter_raw();
+	RV_KUNIT_EXPECT_REACTION_HERE(test, ctx)
+		rv_irqstate_ops.handle_hardirq_exit(NULL, 1);
+	__irq_exit_raw();
+	local_irq_restore(flags);
+}
+
+/* A real task switch is legal before handle_softirqs(), too. */
+static void rv_test_irqstate_rt_prepare_switch(struct kunit *test)
+{
+	struct rv_kunit_ctx *ctx = test->priv;
+	struct irqstate_preempt_ctx *preempt_ctx;
+	struct task_struct *worker;
+	unsigned int saved_count, saved_softirq;
+	unsigned long completed, flags;
+	bool preempted, serving;
+
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT)) {
+		kunit_skip(test, "Requires RT serving-softirq accounting");
+		return;
+	}
+
+	prepare_test(test, &rv_irqstate_ops.mon);
+	guard(migrate)();
+	preempt_ctx = kunit_kzalloc(test, sizeof(*preempt_ctx), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, preempt_ctx);
+	init_completion(&preempt_ctx->worker_done);
+	worker = kthread_create(irqstate_preempt_worker, preempt_ctx,
+				"irqstate-prepare");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(worker));
+	kthread_bind(worker, smp_processor_id());
+	sched_set_fifo(worker);
+	KUNIT_ASSERT_EQ(test, 0,
+			kunit_add_action_or_reset(test, stop_irqstate_preempt_worker,
+						  worker));
+	attach_irqstate_test_probes();
+	KUNIT_ASSERT_EQ(test, 0,
+			kunit_add_action_or_reset(test, detach_irqstate_test_probes,
+						  NULL));
+	saved_count = preempt_count();
+	saved_softirq = softirq_count();
+
+	local_bh_disable();
+	local_irq_save(flags);
+	irq_enter_rcu();
+	irq_exit_rcu();
+	local_irq_restore(flags);
+	__local_bh_disable_ip(_RET_IP_, SOFTIRQ_OFFSET);
+	serving = !!in_serving_softirq();
+	wake_up_process(worker);
+	preempted = completion_done(&preempt_ctx->worker_done);
+	__local_bh_enable_ip(_RET_IP_, SOFTIRQ_OFFSET);
+	local_bh_enable();
+
+	completed = wait_for_completion_timeout(&preempt_ctx->worker_done, HZ);
+	KUNIT_EXPECT_NE(test, completed, 0);
+	KUNIT_EXPECT_TRUE(test, serving);
+	KUNIT_EXPECT_TRUE(test, preempted);
+	KUNIT_EXPECT_FALSE(test, preempt_ctx->worker_in_softirq);
+	KUNIT_EXPECT_EQ(test, preempt_count(), saved_count);
+	KUNIT_EXPECT_EQ(test, softirq_count(), saved_softirq);
+	kunit_info(test, "RT preparation switch serving=%u preempted=%u worker_serving=%u restored=%u\n",
+		   serving, preempted, preempt_ctx->worker_in_softirq,
+		   preempt_count() == saved_count && softirq_count() == saved_softirq);
+	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
+	local_irq_save(flags);
+	__irq_enter_raw();
+	RV_KUNIT_EXPECT_REACTION_HERE(test, ctx)
+		rv_irqstate_ops.handle_hardirq_exit(NULL, 1);
+	__irq_exit_raw();
+	local_irq_restore(flags);
+}
+
 #else
 #define rv_test_irqstate rv_test_stub
 #define rv_test_irqstate_depth rv_test_stub
 #define rv_test_irqstate_sync rv_test_stub
 #define rv_test_irqstate_preempt rv_test_stub
+#define rv_test_irqstate_rt_prepare_irq rv_test_stub
+#define rv_test_irqstate_rt_prepare_switch rv_test_stub
 #endif

@@ -167,6 +167,8 @@ static struct kunit_case rv_mon_test_cases[] = {
 	KUNIT_CASE(rv_test_irqstate_depth),
 	KUNIT_CASE(rv_test_irqstate_sync),
 	KUNIT_CASE(rv_test_irqstate_preempt),
+	KUNIT_CASE(rv_test_irqstate_rt_prepare_irq),
+	KUNIT_CASE(rv_test_irqstate_rt_prepare_switch),
 	KUNIT_CASE(rv_test_irqexit),
 	KUNIT_CASE(rv_test_irqexit_invalid),
 	KUNIT_CASE(rv_test_irqexit_sync),
