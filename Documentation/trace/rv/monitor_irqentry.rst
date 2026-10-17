@@ -44,6 +44,12 @@ preempt-count state:
    * - ``softirq_context_exit``
      - ``softirq_exit``
      - ``hardirq == 0 && serving_softirq == 1``
+   * - ``sched_switch`` from a serving-softirq task (PREEMPT_RT)
+     - ``softirq_suspend``
+     - ``hardirq == 0``
+   * - ``sched_switch`` to a serving-softirq task (PREEMPT_RT)
+     - ``softirq_resume``
+     - ``hardirq == 0``
 
 ``serving_softirq`` uses ``in_serving_softirq()``.  It therefore distinguishes
 actual softirq execution from a task which merely disabled bottom halves.  The
@@ -55,6 +61,14 @@ The model has four states: ``idle``, ``in_hardirq``, ``in_softirq``, and
   idle -> in_hardirq -> idle
   idle -> in_softirq -> idle
   in_softirq -> hardirq_from_softirq -> in_softirq
+
+On PREEMPT_RT, serving-softirq state is task-local and softirq processing is
+preemptible.  A switch away from that task suspends its CPU context
+(``in_softirq -> idle``); a switch back resumes it (``idle -> in_softirq``).
+The adapter reads the outgoing and incoming task's softirq count at
+``sched_switch``.  Interrupts are disabled there, so no hardirq boundary can
+occur between representing the incoming task and the actual context switch.
+A hardirq in a task which preempted a softirq therefore starts in ``idle``.
 
 Hardirq depth greater than one is collapsed into the surrounding hardirq
 state.  The depth comes from the existing hardirq component, so the monitor
@@ -73,7 +87,8 @@ and consumes the event.  An outer exit can instead establish the idle state
 without consuming an unmatched event when monitoring starts in the middle of
 that context.  If monitoring starts while a hardirq interrupts a softirq, the
 hardirq pair is ignored until the enclosing softirq exit establishes the idle
-state.
+state.  On PREEMPT_RT, a softirq suspension also establishes ``idle``, and a
+resumption can start monitoring directly in ``in_softirq``.
 
 Relationship to sched/sts
 -------------------------
@@ -82,10 +97,11 @@ The scheduler ``sts`` monitor models the ordering of IRQ disable/enable,
 scheduler entry/exit, and task switches.  It uses ``irq_handler_entry`` and
 selected x86 vector events to refine that scheduler model.
 
-``irqstate`` does not consume IRQ action or scheduler events.  It observes the
-generic context boundaries instead, so multiple actions in one interrupt and
+``irqstate`` does not consume IRQ action or scheduler entry/exit events.  It
+observes generic context boundaries, so multiple actions in one interrupt and
 an action dispatched through ``generic_handle_irq_safe()`` do not change its
-state.  IRQ-exit scheduling requires a separate monitor and event contract.
+state.  On PREEMPT_RT it uses task switches only to follow the active softirq
+context.  IRQ-exit scheduling requires a separate monitor and event contract.
 
 .. list-table:: Monitor coverage
    :header-rows: 1
@@ -99,9 +115,12 @@ state.  IRQ-exit scheduling requires a separate monitor and event contract.
    * - IRQ action entry
      - yes
      - no
-   * - scheduler entry, exit, and task switch
+   * - scheduler entry and exit
      - yes
      - no
+   * - task switch
+     - yes
+     - PREEMPT_RT softirq context only
    * - complete generic hardirq context
      - no
      - yes

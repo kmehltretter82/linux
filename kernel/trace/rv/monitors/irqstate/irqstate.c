@@ -11,6 +11,7 @@
 #define MODULE_NAME "irqstate"
 
 #include <trace/events/irq.h>
+#include <trace/events/sched.h>
 #include <rv_trace.h>
 #include <monitors/irqentry/irqentry.h>
 
@@ -46,12 +47,16 @@ static inline bool ha_verify_guards(struct ha_monitor *ha_mon,
 	else if (curr_state == idle_irqstate && event == softirq_entry_irqstate)
 		res = ha_get_env(ha_mon, hardirq_irqstate, time_ns) == 0 &&
 		      ha_get_env(ha_mon, serving_softirq_irqstate, time_ns) == 1;
+	else if (curr_state == idle_irqstate && event == softirq_resume_irqstate)
+		res = ha_get_env(ha_mon, hardirq_irqstate, time_ns) == 0;
 	else if (curr_state == in_softirq_irqstate && event == hardirq_entry_irqstate)
 		res = ha_get_env(ha_mon, hardirq_irqstate, time_ns) > 0 &&
 		      ha_get_env(ha_mon, serving_softirq_irqstate, time_ns) == 1;
 	else if (curr_state == in_softirq_irqstate && event == softirq_exit_irqstate)
 		res = ha_get_env(ha_mon, hardirq_irqstate, time_ns) == 0 &&
 		      ha_get_env(ha_mon, serving_softirq_irqstate, time_ns) == 1;
+	else if (curr_state == in_softirq_irqstate && event == softirq_suspend_irqstate)
+		res = ha_get_env(ha_mon, hardirq_irqstate, time_ns) == 0;
 	else if (curr_state == hardirq_from_softirq_irqstate &&
 		 event == hardirq_exit_irqstate)
 		res = ha_get_env(ha_mon, hardirq_irqstate, time_ns) > 0 &&
@@ -114,12 +119,33 @@ static void handle_softirq_exit(void *data, bool serving)
 		da_handle_start_run_event(softirq_exit_irqstate);
 }
 
+#ifdef CONFIG_PREEMPT_RT
+static void handle_sched_switch(void *data, bool preempt,
+				struct task_struct *prev,
+				struct task_struct *next,
+				unsigned int prev_state)
+{
+	/*
+	 * Serving-softirq state belongs to a task on RT. At this tracepoint
+	 * interrupts are disabled and current still names prev. Suspend its
+	 * context before representing the context of the incoming task.
+	 */
+	if (READ_ONCE(prev->softirq_disable_cnt) & SOFTIRQ_OFFSET)
+		da_handle_start_event(softirq_suspend_irqstate);
+	if (READ_ONCE(next->softirq_disable_cnt) & SOFTIRQ_OFFSET)
+		da_handle_start_run_event(softirq_resume_irqstate);
+}
+#endif
+
 static void attach_irqstate(void)
 {
 	rv_attach_trace_probe("irqstate", hardirq_context_entry, handle_hardirq_entry);
 	rv_attach_trace_probe("irqstate", hardirq_context_exit, handle_hardirq_exit);
 	rv_attach_trace_probe("irqstate", softirq_context_entry, handle_softirq_entry);
 	rv_attach_trace_probe("irqstate", softirq_context_exit, handle_softirq_exit);
+#ifdef CONFIG_PREEMPT_RT
+	rv_attach_trace_probe("irqstate", sched_switch, handle_sched_switch);
+#endif
 }
 
 static void detach_irqstate(void)
@@ -128,6 +154,9 @@ static void detach_irqstate(void)
 	rv_detach_trace_probe("irqstate", hardirq_context_exit, handle_hardirq_exit);
 	rv_detach_trace_probe("irqstate", softirq_context_entry, handle_softirq_entry);
 	rv_detach_trace_probe("irqstate", softirq_context_exit, handle_softirq_exit);
+#ifdef CONFIG_PREEMPT_RT
+	rv_detach_trace_probe("irqstate", sched_switch, handle_sched_switch);
+#endif
 }
 
 static int enable_irqstate(void)

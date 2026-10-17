@@ -22,6 +22,8 @@ enum events_irqstate {
 	hardirq_exit_irqstate,
 	softirq_entry_irqstate,
 	softirq_exit_irqstate,
+	softirq_resume_irqstate,
+	softirq_suspend_irqstate,
 	event_max_irqstate,
 };
 
@@ -55,6 +57,8 @@ static const struct automaton_irqstate automaton_irqstate = {
 		"hardirq_exit",
 		"softirq_entry",
 		"softirq_exit",
+		"softirq_resume",
+		"softirq_suspend",
 	},
 	.env_names = {
 		"hardirq",
@@ -66,10 +70,14 @@ static const struct automaton_irqstate automaton_irqstate = {
 			INVALID_STATE,
 			in_softirq_irqstate,
 			INVALID_STATE,
+			in_softirq_irqstate,
+			INVALID_STATE,
 		},
 		{
 			INVALID_STATE,
 			in_softirq_irqstate,
+			INVALID_STATE,
+			INVALID_STATE,
 			INVALID_STATE,
 			INVALID_STATE,
 		},
@@ -78,10 +86,14 @@ static const struct automaton_irqstate automaton_irqstate = {
 			idle_irqstate,
 			INVALID_STATE,
 			INVALID_STATE,
+			INVALID_STATE,
+			INVALID_STATE,
 		},
 		{
 			hardirq_from_softirq_irqstate,
 			INVALID_STATE,
+			INVALID_STATE,
+			idle_irqstate,
 			INVALID_STATE,
 			idle_irqstate,
 		},
