@@ -170,6 +170,23 @@ entry/exit events used by ``sts``.
      - no
      - yes
 
+KUnit scheduling coverage
+-------------------------
+
+With built-in RV KUnit tests, ``rv_test_irqexit_live`` enters the real
+``preempt_schedule_irq()`` helper with and without a task switch on one CPU.
+``rv_test_irqexit_migrate`` instead wakes a same-CPU FIFO worker which moves
+the switched-out owner to a different allowed online CPU. The test requires
+accepted entry and suspension on the source CPU and resumption and return
+on the destination. It also samples the CPU on which the helper actually
+returned, independently of the RV observer, and restores the owner's
+original affinity during cleanup.
+
+The migration case skips when fewer than two allowed CPUs are online, or
+when the tests are modules: the helper is not exported. These tests exercise
+the real helper and scheduler, but invoke the helper directly. They are not
+evidence of an architecture's physical interrupt-return assembly path.
+
 Coverage limits
 ---------------
 

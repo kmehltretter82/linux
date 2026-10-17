@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/completion.h>
+#include <linux/cpu.h>
 #include <linux/hardirq.h>
 #include <linux/irqflags.h>
+#include <linux/jiffies.h>
 #include <linux/kernel.h>
 #include <linux/kthread.h>
 #include <linux/rv.h>
@@ -167,6 +169,17 @@ struct irqexit_live_ctx {
 	unsigned int exits;
 	unsigned int switches_out;
 	unsigned int switches_in;
+	unsigned int entry_cpu;
+	unsigned int exit_cpu;
+	unsigned int switch_out_cpu;
+	unsigned int switch_in_cpu;
+	unsigned int target_cpu;
+	int affinity_result;
+	cpumask_t saved_mask;
+	cpumask_t test_mask;
+	bool migrate;
+	bool cpus_locked;
+	bool affinity_changed;
 	bool observer_attached;
 	bool monitor_enabled;
 };
@@ -175,6 +188,9 @@ static int irqexit_live_worker(void *data)
 {
 	struct irqexit_live_ctx *live = data;
 
+	if (live->migrate)
+		live->affinity_result =
+			set_cpus_allowed_ptr(live->owner, cpumask_of(live->target_cpu));
 	complete(&live->worker_done);
 	while (!kthread_should_stop()) {
 		set_current_state(TASK_INTERRUPTIBLE);
@@ -192,14 +208,21 @@ static void irqexit_observe_event(void *data, int id, char *state,
 
 	if (id != live->owner->pid)
 		return;
-	if (!strcmp(event, "resched_entry"))
+	if (!strcmp(event, "resched_entry")) {
+		live->entry_cpu = raw_smp_processor_id();
 		live->entries++;
-	else if (!strcmp(event, "resched_exit"))
+	} else if (!strcmp(event, "resched_exit")) {
+		live->exit_cpu = raw_smp_processor_id();
 		live->exits++;
-	else if (!strcmp(event, "switch_out") && !strcmp(state, "rescheduling"))
+	} else if (!strcmp(event, "switch_out") && !strcmp(state, "rescheduling")) {
+		if (!live->switches_out)
+			live->switch_out_cpu = raw_smp_processor_id();
 		live->switches_out++;
-	else if (!strcmp(event, "switch_in") && !strcmp(state, "suspended"))
+	} else if (!strcmp(event, "switch_in") && !strcmp(state, "suspended")) {
+		if (!live->switches_in)
+			live->switch_in_cpu = raw_smp_processor_id();
 		live->switches_in++;
+	}
 }
 
 static void irqexit_live_cleanup(void *data)
@@ -215,6 +238,11 @@ static void irqexit_live_cleanup(void *data)
 	tracepoint_synchronize_unregister();
 	if (live->worker)
 		kthread_stop(live->worker);
+	if (live->affinity_changed)
+		KUNIT_EXPECT_EQ(kunit_get_current_test(),
+				set_cpus_allowed_ptr(current, &live->saved_mask), 0);
+	if (live->cpus_locked)
+		cpus_read_unlock();
 
 	RV_KUNIT_EXPECT_NO_REACTION(kunit_get_current_test(), active_ctx);
 	mon->react = mon->reactor ? mon->reactor->react : NULL;
@@ -286,10 +314,97 @@ static void rv_test_irqexit_live(struct kunit *test)
 	kunit_info(test, "live IRQ-exit entries=%u exits=%u switches=%u\n",
 		   entries, exits, switches_out);
 }
+
+static void rv_test_irqexit_migrate(struct kunit *test)
+{
+	struct rv_monitor *mon = rv_irqexit_ops.mon.rv_this;
+	struct rv_kunit_ctx *ctx = test->priv;
+	struct irqexit_live_ctx *live;
+	struct task_struct *worker;
+	unsigned int source_cpu, resumed_cpu;
+	unsigned long flags;
+
+	KUNIT_ASSERT_FALSE(test, mon->enabled);
+	live = kunit_kzalloc(test, sizeof(*live), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, live);
+	live->owner = current;
+	init_completion(&live->worker_done);
+	active_ctx = ctx;
+	mon->react = rv_kunit_mock_react;
+	rv_mock_current(NULL);
+	KUNIT_ASSERT_EQ(test, 0,
+			kunit_add_action_or_reset(test, irqexit_live_cleanup, live));
+	cpus_read_lock();
+	live->cpus_locked = true;
+	if (num_online_cpus() < 2) {
+		kunit_skip(test, "Requires two online CPUs");
+		return;
+	}
+	cpumask_copy(&live->saved_mask, current->cpus_ptr);
+	cpumask_and(&live->test_mask, &live->saved_mask, cpu_online_mask);
+	if (cpumask_weight(&live->test_mask) < 2) {
+		kunit_skip(test, "Requires two allowed online CPUs");
+		return;
+	}
+	source_cpu = cpumask_first(&live->test_mask);
+	live->target_cpu = cpumask_any_but(&live->test_mask, source_cpu);
+	KUNIT_ASSERT_EQ(test, set_cpus_allowed_ptr(current, cpumask_of(source_cpu)), 0);
+	live->affinity_changed = true;
+	live->migrate = true;
+	worker = kthread_create(irqexit_live_worker, live, "rv-irqexit-mig");
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, worker);
+	live->worker = worker;
+	kthread_bind(worker, source_cpu);
+	sched_set_fifo(worker);
+	KUNIT_ASSERT_EQ(test, 0,
+			register_trace_event_irqexit(irqexit_observe_event, live));
+	live->observer_attached = true;
+	KUNIT_ASSERT_EQ(test, mon->enable(), 0);
+	live->monitor_enabled = true;
+	mon->enabled = 1;
+
+	KUNIT_ASSERT_EQ(test, preempt_count(), 0);
+	local_irq_save(flags);
+	live->entries = 0;
+	live->exits = 0;
+	live->switches_out = 0;
+	live->switches_in = 0;
+	/*
+	 * The FIFO worker runs only after this task switches out inside the
+	 * real helper. It moves the queued, non-running owner to another CPU.
+	 * Do not migration-disable the owner: migration is the property tested.
+	 */
+	wake_up_process(worker);
+	preempt_schedule_irq();
+	resumed_cpu = raw_smp_processor_id();
+	mon->enabled = 0;
+	local_irq_restore(flags);
+	KUNIT_ASSERT_NE(test, wait_for_completion_timeout(&live->worker_done, 5 * HZ), 0UL);
+	KUNIT_EXPECT_EQ(test, live->affinity_result, 0);
+	KUNIT_EXPECT_EQ(test, live->entries, 1U);
+	KUNIT_EXPECT_EQ(test, live->exits, 1U);
+	KUNIT_EXPECT_GT(test, live->switches_out, 0U);
+	KUNIT_EXPECT_EQ(test, live->switches_out, live->switches_in);
+	KUNIT_EXPECT_EQ(test, live->entry_cpu, source_cpu);
+	KUNIT_EXPECT_EQ(test, live->switch_out_cpu, source_cpu);
+	KUNIT_EXPECT_EQ(test, live->switch_in_cpu, live->target_cpu);
+	KUNIT_EXPECT_EQ(test, live->exit_cpu, live->target_cpu);
+	/* Check actual resumed execution independently of the RV observer. */
+	KUNIT_EXPECT_EQ(test, resumed_cpu, live->target_cpu);
+	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
+	kunit_info(test, "live IRQ-exit migration cpu=%u->%u actual=%u entries=%u exits=%u switches=%u\n",
+		   live->entry_cpu, live->exit_cpu, resumed_cpu, live->entries, live->exits,
+		   live->switches_out);
+}
 #else
 static void rv_test_irqexit_live(struct kunit *test)
 {
 	/* preempt_schedule_irq() is deliberately not exported to modules. */
+	kunit_skip(test, "Requires built-in RV tests");
+}
+
+static void rv_test_irqexit_migrate(struct kunit *test)
+{
 	kunit_skip(test, "Requires built-in RV tests");
 }
 #endif
@@ -299,4 +414,5 @@ static void rv_test_irqexit_live(struct kunit *test)
 #define rv_test_irqexit_invalid rv_test_stub
 #define rv_test_irqexit_sync rv_test_stub
 #define rv_test_irqexit_live rv_test_stub
+#define rv_test_irqexit_migrate rv_test_stub
 #endif
