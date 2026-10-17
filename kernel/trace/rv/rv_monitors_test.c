@@ -23,8 +23,10 @@ static struct rv_kunit_ctx *active_ctx;
 __printf(1, 0)
 static void rv_kunit_mock_react(const char *msg, va_list args)
 {
-	if (active_ctx)
+	if (active_ctx) {
 		++active_ctx->reactions;
+		vprintk(msg, args);
+	}
 }
 
 /*
