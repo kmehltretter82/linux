@@ -90,6 +90,43 @@ hardirq pair is ignored until the enclosing softirq exit establishes the idle
 state.  On PREEMPT_RT, a softirq suspension also establishes ``idle``, and a
 resumption can start monitoring directly in ``in_softirq``.
 
+Monitor irqexit
+---------------
+
+The ``irqexit`` monitor follows each task's invocation of
+``preempt_schedule_irq()``. It consumes ``sched_irq_preempt_entry``,
+``sched_irq_preempt_exit``, and ``sched_switch``. Both boundary events must
+observe zero hardirq count and disabled local interrupts. The owner saved
+in the invocation's stack frame must match the current task at both
+boundaries.
+
+The model has three states: ``idle``, ``rescheduling``, and ``suspended``.
+Entry changes ``idle`` to ``rescheduling``; return changes it back to
+``idle``. Switching out an active invocation changes ``rescheduling`` to
+``suspended``; switching that task in resumes ``rescheduling``. The
+incoming event cannot require its target to be current: ``sched_switch``
+still executes in the outgoing task. Local interrupts remain disabled
+until the incoming task runs.
+
+Instances belong to tasks, not CPUs. Two tasks may have independently
+suspended invocations, and resuming on another CPU must use the same task's
+instance. An interrupt or IRQ-exit schedule in another task cannot return
+on behalf of the suspended owner. Ordinary switches while ``idle`` do not
+change its state.
+
+An entry starts monitoring and consumes the event. If the monitor was
+enabled during an existing invocation, its first valid exit instead
+establishes ``idle`` without consuming an unmatched event. Switches alone
+do not synchronize a task. An exit with an invalid context or owner must
+not be skipped as a synchronization event.
+
+The helper can also run on a kernel exception return. Its events therefore
+do not prove that an invocation followed a physical interrupt, and they do
+not describe architecture register restoration or context tracking after
+the helper returns. The existing helper entry assertions can reject an
+invalid caller before the entry event; such a failure is not a violation
+detected by this monitor.
+
 Relationship to sched/sts
 -------------------------
 
@@ -101,7 +138,9 @@ selected x86 vector events to refine that scheduler model.
 observes generic context boundaries, so multiple actions in one interrupt and
 an action dispatched through ``generic_handle_irq_safe()`` do not change its
 state.  On PREEMPT_RT it uses task switches only to follow the active softirq
-context.  IRQ-exit scheduling requires a separate monitor and event contract.
+context. ``irqexit`` observes the surrounding IRQ-preemption loop and its
+task owner, rather than inferring that protocol from individual scheduler
+entry/exit events used by ``sts``.
 
 .. list-table:: Monitor coverage
    :header-rows: 1
@@ -143,8 +182,9 @@ this monitor cannot observe:
   ``__irq_enter_raw()`` and ``__irq_exit_raw()`` (including x86 simple system
   vectors);
 - NMI entry and exit; or
-- the complete ordering of generic IRQ teardown, inline softirq processing,
-  and IRQ-exit rescheduling.
+- the complete ordering of generic IRQ teardown and inline softirq
+  processing with respect to an IRQ-exit reschedule. ``irqexit`` checks the
+  generic scheduling helper separately, not an architecture's entire exit.
 
 The standard hardirq tracepoints describe individual IRQ actions rather than
 physical interrupt boundaries.  They are deliberately not used: synthetic
@@ -163,7 +203,9 @@ With tracefs mounted at ``/sys/kernel/tracing``::
   # cd /sys/kernel/tracing/rv
   # grep -x irqentry:irqstate available_monitors
   # echo irqstate > enabled_monitors
+  # echo irqexit >> enabled_monitors
   # echo printk > monitors/irqentry/irqstate/reactors
+  # echo printk > monitors/irqentry/irqexit/reactors
 
 The trace-only reactor should be used during initial qualification.  The panic
 reactor is appropriate only after unexplained violations have been excluded on

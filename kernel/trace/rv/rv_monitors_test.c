@@ -152,6 +152,7 @@ static void rv_test_dummy(struct kunit *test)
 #include "monitors/sssw/sssw_kunit.c"
 #include "monitors/sts/sts_kunit.c"
 #include "monitors/irqstate/irqstate_kunit.c"
+#include "monitors/irqexit/irqexit_kunit.c"
 #include "monitors/opid/opid_kunit.c"
 #include "monitors/nomiss/nomiss_kunit.c"
 #include "monitors/pagefault/pagefault_kunit.c"
@@ -164,6 +165,9 @@ static struct kunit_case rv_mon_test_cases[] = {
 	KUNIT_CASE(rv_test_sts),
 	KUNIT_CASE(rv_test_irqstate),
 	KUNIT_CASE(rv_test_irqstate_preempt),
+	KUNIT_CASE(rv_test_irqexit),
+	KUNIT_CASE(rv_test_irqexit_invalid),
+	KUNIT_CASE(rv_test_irqexit_sync),
 	KUNIT_CASE(rv_test_opid),
 	KUNIT_CASE(rv_test_nomiss),
 	KUNIT_CASE(rv_test_pagefault),
