@@ -80,8 +80,10 @@ DECLARE_EVENT_CLASS(softirq_context,
  * softirq_context_entry - serving-softirq state has been established
  * @serving: whether the current task is serving a softirq
  *
- * This event describes the complete softirq processing context rather than
- * an individual softirq action.
+ * This event runs with local interrupts disabled after the serving bit is
+ * set. On PREEMPT_RT it includes preparation before handle_softirqs(), even
+ * if the pending-work check finds nothing. It does not mark an individual
+ * action or the start of CPU-time accounting.
  */
 DEFINE_EVENT(softirq_context, softirq_context_entry,
 	     TP_PROTO(bool serving),
@@ -90,6 +92,9 @@ DEFINE_EVENT(softirq_context, softirq_context_entry,
 /**
  * softirq_context_exit - serving-softirq state is about to be removed
  * @serving: whether the current task is serving a softirq
+ *
+ * This event runs with local interrupts disabled before the serving bit is
+ * cleared. On PREEMPT_RT this includes teardown after handle_softirqs().
  */
 DEFINE_EVENT(softirq_context, softirq_context_exit,
 	     TP_PROTO(bool serving),

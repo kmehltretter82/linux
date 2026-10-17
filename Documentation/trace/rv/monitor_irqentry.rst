@@ -52,8 +52,23 @@ preempt-count state:
      - ``hardirq == 0``
 
 ``serving_softirq`` uses ``in_serving_softirq()``.  It therefore distinguishes
-actual softirq execution from a task which merely disabled bottom halves.  The
-hardirq condition uses the hardirq component of ``preempt_count``.
+a serving-softirq interval from a task which merely disabled bottom halves.
+The hardirq condition uses the hardirq component of ``preempt_count``.
+
+On PREEMPT_RT the serving interval includes preparation before
+``handle_softirqs()`` and teardown after it, not just handler execution or
+CPU-time accounting. A worker can enter and leave this context even if its
+pending-work check finds nothing. The RT entry event follows the counter
+update that sets the serving bit, and the exit event precedes the update
+that clears it. Processing inline from ``local_bh_enable()`` has the same
+boundaries; ordinary BH-disable nesting does not emit context events.
+
+RT worker entry acquires any blocking BH lock before the counter update.
+When the entry tracepoint is enabled, the update and event execute together
+with local IRQs disabled, then restore the original IRQ state. No new IRQ
+disable/enable pair is introduced when that tracepoint is disabled. RT
+decrements already execute with IRQs disabled. Non-RT retains its existing
+IRQ-disabled processing-loop boundaries.
 
 The model has four states: ``idle``, ``in_hardirq``, ``in_softirq``, and
 ``hardirq_from_softirq``.  It accepts these outer-context sequences::
@@ -62,7 +77,7 @@ The model has four states: ``idle``, ``in_hardirq``, ``in_softirq``, and
   idle -> in_softirq -> idle
   in_softirq -> hardirq_from_softirq -> in_softirq
 
-On PREEMPT_RT, serving-softirq state is task-local and softirq processing is
+On PREEMPT_RT, serving-softirq state is task-local and the serving interval is
 preemptible.  A switch away from that task suspends its CPU context
 (``in_softirq -> idle``); a switch back resumes it (``idle -> in_softirq``).
 The adapter reads the outgoing and incoming task's softirq count at
@@ -206,8 +221,9 @@ Coverage limits
 ---------------
 
 The context tracepoints are emitted by ``irq_enter_rcu()`` and
-``irq_exit_rcu()`` and by the generic softirq processing loop.  Consequently
-this monitor cannot observe:
+``irq_exit_rcu()``. Softirq boundaries come from the RT serving-bit updates
+or the non-RT generic processing loop. Consequently this monitor cannot
+observe:
 
 - the early architecture entry interval before ``irq_enter_rcu()``;
 - architecture or special-vector paths which use only

@@ -178,7 +178,9 @@ bool local_bh_blocked(void)
 
 void __local_bh_disable_ip(unsigned long ip, unsigned int cnt)
 {
+	unsigned long trace_flags = 0;
 	unsigned long flags;
+	bool trace_serving;
 	int newcnt;
 
 	WARN_ON_ONCE(in_hardirq());
@@ -199,6 +201,16 @@ void __local_bh_disable_ip(unsigned long ip, unsigned int cnt)
 			DEBUG_LOCKS_WARN_ON(this_cpu_read(softirq_ctrl.cnt));
 		}
 	}
+
+	/*
+	 * A serving interval starts here, before handle_softirqs(). When its
+	 * entry is traced, keep IRQs and task switches from observing the bit
+	 * before the event. Any blocking BH lock was acquired above.
+	 */
+	trace_serving = (cnt & SOFTIRQ_OFFSET) &&
+			trace_softirq_context_entry_enabled();
+	if (trace_serving)
+		local_irq_save(trace_flags);
 
 	/*
 	 * Track the per CPU softirq disabled state. On RT this is per CPU
@@ -233,14 +245,24 @@ void __local_bh_disable_ip(unsigned long ip, unsigned int cnt)
 			raw_local_irq_restore(flags);
 		}
 	}
+
+	if (trace_serving) {
+		trace_softirq_context_entry(!!in_serving_softirq());
+		local_irq_restore(trace_flags);
+	}
 }
 EXPORT_SYMBOL(__local_bh_disable_ip);
 
 static void __local_bh_enable(unsigned int cnt, bool unlock)
 {
+	bool entering = (cnt & SOFTIRQ_OFFSET) && !in_serving_softirq();
 	unsigned long flags;
 	bool sirq_en = false;
 	int newcnt;
+
+	/* Callers already disabled IRQs around the counter and its events. */
+	if ((cnt & SOFTIRQ_OFFSET) && !entering)
+		trace_softirq_context_exit(!!in_serving_softirq());
 
 	if (IS_ENABLED(CONFIG_PREEMPT_RT_NEEDS_BH_LOCK)) {
 		DEBUG_LOCKS_WARN_ON(current->softirq_disable_cnt !=
@@ -276,6 +298,10 @@ static void __local_bh_enable(unsigned int cnt, bool unlock)
 			WARN_ON_ONCE(current->softirq_disable_cnt < 0);
 		}
 	}
+
+	/* local_bh_enable() can turn BH-disabled state into serving state. */
+	if (entering)
+		trace_softirq_context_entry(!!in_serving_softirq());
 }
 
 void __local_bh_enable_ip(unsigned long ip, unsigned int cnt)
@@ -621,7 +647,8 @@ static void handle_softirqs(bool ksirqd)
 	softirq_handle_begin();
 	in_hardirq = lockdep_softirq_start();
 	account_softirq_enter(current);
-	trace_softirq_context_entry(!!in_serving_softirq());
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT))
+		trace_softirq_context_entry(!!in_serving_softirq());
 
 restart:
 	/* Reset the pending bitmask before enabling irqs */
@@ -669,7 +696,8 @@ restart:
 		wakeup_softirqd();
 	}
 
-	trace_softirq_context_exit(!!in_serving_softirq());
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT))
+		trace_softirq_context_exit(!!in_serving_softirq());
 	account_softirq_exit(current);
 	lockdep_softirq_end(in_hardirq);
 	softirq_handle_end();
