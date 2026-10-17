@@ -209,8 +209,8 @@ With built-in RV KUnit tests, ``rv_test_irqexit_live`` enters the real
 the switched-out owner to a different allowed online CPU. The test requires
 accepted entry and suspension on the source CPU and resumption and return
 on the destination. It also samples the CPU on which the helper actually
-returned, independently of the RV observer, and restores the owner's
-original affinity during cleanup.
+returned, independently of the RV observer, and checks restoration of the
+owner's original affinity before the tested task exits.
 
 The two live helper cases use single-element parameter fixtures. Monitor
 slot allocation and destruction, and CPU-hotplug read locking, run in the
