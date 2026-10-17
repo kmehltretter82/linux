@@ -83,9 +83,20 @@ static bool exercise_irqstate_softirq(enum irqstate_softirq_test test)
 	return completed != 0;
 }
 
+static void attach_irqstate_test_probes(void)
+{
+	/* Match RV core: do not process an incomplete set of probes. */
+	rv_irqstate_ops.mon.rv_this->enabled = 0;
+	rv_irqstate_ops.attach();
+	rv_irqstate_ops.mon.rv_this->reset();
+	rv_irqstate_ops.mon.rv_this->enabled = 1;
+}
+
 static void detach_irqstate_test_probes(void *unused)
 {
+	rv_irqstate_ops.mon.rv_this->enabled = 0;
 	rv_irqstate_ops.detach();
+	tracepoint_synchronize_unregister();
 }
 
 static void rv_test_irqstate(struct kunit *test)
@@ -164,7 +175,7 @@ static void rv_test_irqstate(struct kunit *test)
 	RV_KUNIT_EXPECT_REACTION(test, ctx);
 
 	/* Exercise the actual generic tracepoint attachments as well. */
-	rv_irqstate_ops.attach();
+	attach_irqstate_test_probes();
 	KUNIT_ASSERT_EQ(test, 0,
 			kunit_add_action_or_reset(test, detach_irqstate_test_probes,
 						  NULL));
@@ -277,7 +288,7 @@ static void rv_test_irqstate_preempt(struct kunit *test)
 			kunit_add_action_or_reset(test, stop_irqstate_preempt_worker,
 						  worker));
 
-	rv_irqstate_ops.attach();
+	attach_irqstate_test_probes();
 	KUNIT_ASSERT_EQ(test, 0,
 			kunit_add_action_or_reset(test, detach_irqstate_test_probes,
 						  NULL));
