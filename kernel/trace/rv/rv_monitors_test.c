@@ -161,6 +161,7 @@ static struct kunit_case rv_mon_test_cases[] = {
 	KUNIT_CASE(rv_test_sssw),
 	KUNIT_CASE(rv_test_sts),
 	KUNIT_CASE(rv_test_irqstate),
+	KUNIT_CASE(rv_test_irqstate_preempt),
 	KUNIT_CASE(rv_test_opid),
 	KUNIT_CASE(rv_test_nomiss),
 	KUNIT_CASE(rv_test_pagefault),

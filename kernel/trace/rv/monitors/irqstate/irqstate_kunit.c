@@ -5,7 +5,9 @@
 #include <linux/irqflags.h>
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
+#include <linux/kthread.h>
 #include <linux/rv.h>
+#include <linux/sched.h>
 #include <rv/kunit.h>
 #include <trace/events/irq.h>
 
@@ -199,6 +201,99 @@ static void rv_test_irqstate(struct kunit *test)
 	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
 }
 
+struct irqstate_preempt_ctx {
+	struct tasklet_struct tasklet;
+	struct task_struct *worker;
+	struct completion tasklet_done;
+	struct completion worker_done;
+	bool preempted;
+	bool worker_in_softirq;
+};
+
+static int irqstate_preempt_worker(void *arg)
+{
+	struct irqstate_preempt_ctx *preempt_ctx = arg;
+	unsigned long flags;
+
+	preempt_ctx->worker_in_softirq = !!in_serving_softirq();
+	local_irq_save(flags);
+	irq_enter_rcu();
+	irq_exit_rcu();
+	local_irq_restore(flags);
+	complete(&preempt_ctx->worker_done);
+
+	for (;;) {
+		set_current_state(TASK_INTERRUPTIBLE);
+		if (kthread_should_stop())
+			break;
+		schedule();
+	}
+	__set_current_state(TASK_RUNNING);
+	return 0;
+}
+
+static void irqstate_preempt_tasklet(struct tasklet_struct *tasklet)
+{
+	struct irqstate_preempt_ctx *preempt_ctx;
+
+	preempt_ctx = from_tasklet(preempt_ctx, tasklet, tasklet);
+	wake_up_process(preempt_ctx->worker);
+	preempt_ctx->preempted = completion_done(&preempt_ctx->worker_done);
+	complete(&preempt_ctx->tasklet_done);
+}
+
+static void stop_irqstate_preempt_worker(void *worker)
+{
+	kthread_stop(worker);
+}
+
+/* A hardirq in another task must not inherit a suspended RT softirq. */
+static void rv_test_irqstate_preempt(struct kunit *test)
+{
+	struct rv_kunit_ctx *ctx = test->priv;
+	struct irqstate_preempt_ctx *preempt_ctx;
+	struct task_struct *worker;
+	unsigned long completed;
+
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT)) {
+		kunit_skip(test, "Requires preemptible softirq processing");
+		return;
+	}
+
+	prepare_test(test, &rv_irqstate_ops.mon);
+	guard(migrate)();
+
+	preempt_ctx = kunit_kzalloc(test, sizeof(*preempt_ctx), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, preempt_ctx);
+	init_completion(&preempt_ctx->tasklet_done);
+	init_completion(&preempt_ctx->worker_done);
+	worker = kthread_create(irqstate_preempt_worker, preempt_ctx,
+				"irqstate-preempt");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(worker));
+	preempt_ctx->worker = worker;
+	kthread_bind(worker, smp_processor_id());
+	sched_set_fifo(worker);
+	KUNIT_ASSERT_EQ(test, 0,
+			kunit_add_action_or_reset(test, stop_irqstate_preempt_worker,
+						  worker));
+
+	rv_irqstate_ops.attach();
+	KUNIT_ASSERT_EQ(test, 0,
+			kunit_add_action_or_reset(test, detach_irqstate_test_probes,
+						  NULL));
+	tasklet_setup(&preempt_ctx->tasklet, irqstate_preempt_tasklet);
+	tasklet_schedule(&preempt_ctx->tasklet);
+	completed = wait_for_completion_timeout(&preempt_ctx->tasklet_done, HZ);
+	tasklet_kill(&preempt_ctx->tasklet);
+	KUNIT_ASSERT_NE(test, completed, 0);
+	KUNIT_ASSERT_NE(test,
+			wait_for_completion_timeout(&preempt_ctx->worker_done, HZ), 0);
+	KUNIT_EXPECT_TRUE(test, preempt_ctx->preempted);
+	KUNIT_EXPECT_FALSE(test, preempt_ctx->worker_in_softirq);
+	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
+}
+
 #else
 #define rv_test_irqstate rv_test_stub
+#define rv_test_irqstate_preempt rv_test_stub
 #endif
