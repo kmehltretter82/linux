@@ -105,6 +105,13 @@ hardirq pair is ignored until the enclosing softirq exit establishes the idle
 state.  On PREEMPT_RT, a softirq suspension also establishes ``idle``, and a
 resumption can start monitoring directly in ``in_softirq``.
 
+On PREEMPT_RT, probe attachment waits for an RCU grace period before the
+monitor can become enabled. This drains BH preparations which sampled the
+entry tracepoint disabled before attachment. Otherwise an intervening IRQ
+could synchronize the model to idle before a preparation publishes its
+serving bit without an entry event. New preparations see the attached
+entry probe and serialize the bit update with their event.
+
 Monitor irqexit
 ---------------
 

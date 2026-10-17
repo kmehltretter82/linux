@@ -4,6 +4,7 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/rcupdate.h>
 #include <linux/rv.h>
 #include <linux/tracepoint.h>
 #include <rv/instrumentation.h>
@@ -145,6 +146,13 @@ static void attach_irqstate(void)
 	rv_attach_trace_probe("irqstate", softirq_context_exit, handle_softirq_exit);
 #ifdef CONFIG_PREEMPT_RT
 	rv_attach_trace_probe("irqstate", sched_switch, handle_sched_switch);
+	/*
+	 * Drain BH preparations which sampled the entry tracepoint disabled.
+	 * Their RCU read-side protection covers that sample and the serving
+	 * interval. Do not enable the monitor while one can still publish a
+	 * serving bit without its entry event after an IRQ synchronizes idle.
+	 */
+	synchronize_rcu();
 #endif
 }
 
