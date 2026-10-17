@@ -168,6 +168,7 @@ static struct kunit_case rv_mon_test_cases[] = {
 	KUNIT_CASE(rv_test_irqexit),
 	KUNIT_CASE(rv_test_irqexit_invalid),
 	KUNIT_CASE(rv_test_irqexit_sync),
+	KUNIT_CASE(rv_test_irqexit_live),
 	KUNIT_CASE(rv_test_opid),
 	KUNIT_CASE(rv_test_nomiss),
 	KUNIT_CASE(rv_test_pagefault),

@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
+#include <linux/completion.h>
 #include <linux/hardirq.h>
 #include <linux/irqflags.h>
 #include <linux/kernel.h>
+#include <linux/kthread.h>
 #include <linux/rv.h>
+#include <linux/sched.h>
 #include <rv/kunit.h>
+#include <rv_trace.h>
 
 #include "irqexit_kunit.h"
 
@@ -154,8 +158,145 @@ static void rv_test_irqexit_sync(struct kunit *test)
 	local_irq_restore(flags);
 }
 
+#ifndef MODULE
+struct irqexit_live_ctx {
+	struct task_struct *owner;
+	struct task_struct *worker;
+	struct completion worker_done;
+	unsigned int entries;
+	unsigned int exits;
+	unsigned int switches_out;
+	unsigned int switches_in;
+	bool observer_attached;
+	bool monitor_enabled;
+};
+
+static int irqexit_live_worker(void *data)
+{
+	struct irqexit_live_ctx *live = data;
+
+	complete(&live->worker_done);
+	while (!kthread_should_stop()) {
+		set_current_state(TASK_INTERRUPTIBLE);
+		if (!kthread_should_stop())
+			schedule();
+	}
+	__set_current_state(TASK_RUNNING);
+	return 0;
+}
+
+static void irqexit_observe_event(void *data, int id, char *state,
+				  char *event, char *next_state, bool final_state)
+{
+	struct irqexit_live_ctx *live = data;
+
+	if (id != live->owner->pid)
+		return;
+	if (!strcmp(event, "resched_entry"))
+		live->entries++;
+	else if (!strcmp(event, "resched_exit"))
+		live->exits++;
+	else if (!strcmp(event, "switch_out") && !strcmp(state, "rescheduling"))
+		live->switches_out++;
+	else if (!strcmp(event, "switch_in") && !strcmp(state, "suspended"))
+		live->switches_in++;
+}
+
+static void irqexit_live_cleanup(void *data)
+{
+	struct irqexit_live_ctx *live = data;
+	struct rv_monitor *mon = rv_irqexit_ops.mon.rv_this;
+
+	mon->enabled = 0;
+	if (live->monitor_enabled)
+		mon->disable();
+	if (live->observer_attached)
+		unregister_trace_event_irqexit(irqexit_observe_event, live);
+	tracepoint_synchronize_unregister();
+	if (live->worker)
+		kthread_stop(live->worker);
+
+	RV_KUNIT_EXPECT_NO_REACTION(kunit_get_current_test(), active_ctx);
+	mon->react = mon->reactor ? mon->reactor->react : NULL;
+	active_ctx = NULL;
+	rv_mock_current(NULL);
+}
+
+static void rv_test_irqexit_live(struct kunit *test)
+{
+	struct rv_monitor *mon = rv_irqexit_ops.mon.rv_this;
+	struct rv_kunit_ctx *ctx = test->priv;
+	struct irqexit_live_ctx *live;
+	struct task_struct *worker;
+	unsigned int entries, exits, switches_out, switches_in;
+	unsigned int first_entries, first_switches;
+	unsigned long flags;
+	bool worker_done;
+
+	KUNIT_ASSERT_FALSE(test, mon->enabled);
+	live = kunit_kzalloc(test, sizeof(*live), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, live);
+	live->owner = current;
+	init_completion(&live->worker_done);
+
+	active_ctx = ctx;
+	mon->react = rv_kunit_mock_react;
+	rv_mock_current(NULL);
+	KUNIT_ASSERT_EQ(test, 0,
+			kunit_add_action_or_reset(test, irqexit_live_cleanup, live));
+	/* The worker must run on this CPU inside the explicit scheduling loop. */
+	guard(migrate)();
+	worker = kthread_create(irqexit_live_worker, live, "rv-irqexit-test");
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, worker);
+	live->worker = worker;
+	kthread_bind(worker, smp_processor_id());
+	sched_set_fifo(worker);
+	KUNIT_ASSERT_EQ(test, 0,
+			register_trace_event_irqexit(irqexit_observe_event, live));
+	live->observer_attached = true;
+
+	/* The suite holds rv_interface_lock: allocate and reset a real slot. */
+	KUNIT_ASSERT_EQ(test, mon->enable(), 0);
+	live->monitor_enabled = true;
+	mon->enabled = 1;
+
+	KUNIT_ASSERT_EQ(test, preempt_count(), 0);
+	local_irq_save(flags);
+	preempt_schedule_irq();
+	first_entries = live->entries;
+	first_switches = live->switches_out;
+	wake_up_process(worker);
+	preempt_schedule_irq();
+	entries = live->entries;
+	exits = live->exits;
+	switches_out = live->switches_out;
+	switches_in = live->switches_in;
+	worker_done = completion_done(&live->worker_done);
+	local_irq_restore(flags);
+
+	/* Accepted model events prove that the real boundary probes ran. */
+	KUNIT_EXPECT_GT(test, entries, 0);
+	KUNIT_EXPECT_GT(test, first_entries, 0);
+	KUNIT_EXPECT_GT(test, entries, first_entries);
+	KUNIT_EXPECT_EQ(test, entries, exits);
+	KUNIT_EXPECT_EQ(test, switches_out, switches_in);
+	KUNIT_EXPECT_GT(test, switches_out, first_switches);
+	KUNIT_EXPECT_TRUE(test, worker_done);
+	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
+	kunit_info(test, "live IRQ-exit entries=%u exits=%u switches=%u\n",
+		   entries, exits, switches_out);
+}
+#else
+static void rv_test_irqexit_live(struct kunit *test)
+{
+	/* preempt_schedule_irq() is deliberately not exported to modules. */
+	kunit_skip(test, "Requires built-in RV tests");
+}
+#endif
+
 #else
 #define rv_test_irqexit rv_test_stub
 #define rv_test_irqexit_invalid rv_test_stub
 #define rv_test_irqexit_sync rv_test_stub
+#define rv_test_irqexit_live rv_test_stub
 #endif
