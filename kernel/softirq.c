@@ -621,6 +621,7 @@ static void handle_softirqs(bool ksirqd)
 	softirq_handle_begin();
 	in_hardirq = lockdep_softirq_start();
 	account_softirq_enter(current);
+	trace_softirq_context_entry(!!in_serving_softirq());
 
 restart:
 	/* Reset the pending bitmask before enabling irqs */
@@ -668,6 +669,7 @@ restart:
 		wakeup_softirqd();
 	}
 
+	trace_softirq_context_exit(!!in_serving_softirq());
 	account_softirq_exit(current);
 	lockdep_softirq_end(in_hardirq);
 	softirq_handle_end();
@@ -698,6 +700,7 @@ void irq_enter_rcu(void)
 		tick_irq_enter();
 
 	account_hardirq_enter(current);
+	trace_hardirq_context_entry(hardirq_count() >> HARDIRQ_SHIFT);
 }
 
 /**
@@ -747,6 +750,7 @@ static inline void __irq_exit_rcu(void)
 #else
 	lockdep_assert_irqs_disabled();
 #endif
+	trace_hardirq_context_exit(hardirq_count() >> HARDIRQ_SHIFT);
 	account_hardirq_exit(current);
 	preempt_count_sub(HARDIRQ_OFFSET);
 	if (!in_interrupt() && local_softirq_pending()) {
