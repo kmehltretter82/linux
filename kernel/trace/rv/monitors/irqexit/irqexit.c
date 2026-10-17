@@ -84,6 +84,18 @@ static void handle_resched_exit(void *data, struct task_struct *owner)
 		da_handle_start_event(owner, resched_exit_irqexit);
 }
 
+static void probe_resched_entry(void *data, struct task_struct *owner,
+				unsigned long pc, bool irq_off)
+{
+	handle_resched_entry(data, owner);
+}
+
+static void probe_resched_exit(void *data, struct task_struct *owner,
+			       unsigned long pc, bool irq_off)
+{
+	handle_resched_exit(data, owner);
+}
+
 static void handle_sched_switch(void *data, bool preempt,
 				struct task_struct *prev,
 				struct task_struct *next,
@@ -102,8 +114,8 @@ static int enable_irqexit(void)
 	if (retval)
 		return retval;
 
-	rv_attach_trace_probe("irqexit", sched_irq_preempt_entry, handle_resched_entry);
-	rv_attach_trace_probe("irqexit", sched_irq_preempt_exit, handle_resched_exit);
+	rv_attach_trace_probe("irqexit", sched_irq_preempt_entry, probe_resched_entry);
+	rv_attach_trace_probe("irqexit", sched_irq_preempt_exit, probe_resched_exit);
 	rv_attach_trace_probe("irqexit", sched_switch, handle_sched_switch);
 
 	return 0;
@@ -113,8 +125,8 @@ static void disable_irqexit(void)
 {
 	rv_this.enabled = 0;
 
-	rv_detach_trace_probe("irqexit", sched_irq_preempt_entry, handle_resched_entry);
-	rv_detach_trace_probe("irqexit", sched_irq_preempt_exit, handle_resched_exit);
+	rv_detach_trace_probe("irqexit", sched_irq_preempt_entry, probe_resched_entry);
+	rv_detach_trace_probe("irqexit", sched_irq_preempt_exit, probe_resched_exit);
 	rv_detach_trace_probe("irqexit", sched_switch, handle_sched_switch);
 
 	ha_monitor_destroy();

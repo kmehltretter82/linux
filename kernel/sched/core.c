@@ -7600,7 +7600,9 @@ asmlinkage __visible void __sched preempt_schedule_irq(void)
 	BUG_ON(preempt_count() || !irqs_disabled());
 
 	prev_state = exception_enter();
-	trace_sched_irq_preempt_entry(owner);
+	/* Sample before tracing bookkeeping can change the observed context. */
+	if (trace_sched_irq_preempt_entry_enabled())
+		trace_sched_irq_preempt_entry(owner, preempt_count(), irqs_disabled());
 
 	do {
 		preempt_disable();
@@ -7610,7 +7612,8 @@ asmlinkage __visible void __sched preempt_schedule_irq(void)
 		sched_preempt_enable_no_resched();
 	} while (need_resched());
 
-	trace_sched_irq_preempt_exit(owner);
+	if (trace_sched_irq_preempt_exit_enabled())
+		trace_sched_irq_preempt_exit(owner, preempt_count(), irqs_disabled());
 	exception_exit(prev_state);
 }
 

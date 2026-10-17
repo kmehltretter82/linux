@@ -122,6 +122,13 @@ observe zero hardirq count and disabled local interrupts. The owner saved
 in the invocation's stack frame must match the current task at both
 boundaries.
 
+The boundary records carry preempt-count and interrupt-state snapshots
+taken at the scheduler call site, before tracepoint dispatch or ring-buffer
+reservation. Sampling in ``TP_fast_assign`` would instead include tracing's
+own context changes. Disabled hooks do not take these extra snapshots.
+The RV adapter still evaluates its original live-context guards; the raw
+record is an independent diagnostic channel, not a replacement verdict.
+
 The model has three states: ``idle``, ``rescheduling``, and ``suspended``.
 Entry changes ``idle`` to ``rescheduling``; return changes it back to
 ``idle``. Switching out an active invocation changes ``rescheduling`` to

@@ -11,6 +11,7 @@
 #include <linux/sched/task.h>
 #include <rv/kunit.h>
 #include <rv_trace.h>
+#include <trace/events/sched.h>
 
 #include "irqexit_kunit.h"
 
@@ -176,12 +177,17 @@ struct irqexit_live_ctx {
 	unsigned int switch_out_cpu;
 	unsigned int switch_in_cpu;
 	unsigned int target_cpu;
+	unsigned int raw_entries;
+	unsigned int raw_exits;
+	unsigned int bad_raw_context;
 	int affinity_result;
 	cpumask_t saved_mask;
 	cpumask_t test_mask;
 	bool migrate;
 	bool affinity_changed;
 	bool observer_attached;
+	bool raw_entry_attached;
+	bool raw_exit_attached;
 };
 
 /* Parent fixtures run in the suite runner, which owns rv_interface_lock. */
@@ -262,6 +268,44 @@ static void irqexit_observe_event(void *data, int id, char *state,
 	}
 }
 
+static void irqexit_observe_entry(void *data, struct task_struct *owner,
+				  unsigned long pc, bool irq_off)
+{
+	struct irqexit_live_ctx *live = data;
+
+	if (owner != live->owner)
+		return;
+	live->raw_entries++;
+	if (pc || !irq_off)
+		live->bad_raw_context++;
+}
+
+static void irqexit_observe_exit(void *data, struct task_struct *owner,
+				 unsigned long pc, bool irq_off)
+{
+	struct irqexit_live_ctx *live = data;
+
+	if (owner != live->owner)
+		return;
+	live->raw_exits++;
+	if (pc || !irq_off)
+		live->bad_raw_context++;
+}
+
+static int irqexit_observe_boundaries(struct irqexit_live_ctx *live)
+{
+	int ret;
+
+	ret = register_trace_sched_irq_preempt_entry(irqexit_observe_entry, live);
+	if (ret)
+		return ret;
+	live->raw_entry_attached = true;
+	ret = register_trace_sched_irq_preempt_exit(irqexit_observe_exit, live);
+	if (!ret)
+		live->raw_exit_attached = true;
+	return ret;
+}
+
 static void irqexit_live_cleanup(void *data)
 {
 	struct irqexit_live_ctx *live = data;
@@ -270,6 +314,10 @@ static void irqexit_live_cleanup(void *data)
 	mon->enabled = 0;
 	if (live->observer_attached)
 		unregister_trace_event_irqexit(irqexit_observe_event, live);
+	if (live->raw_entry_attached)
+		unregister_trace_sched_irq_preempt_entry(irqexit_observe_entry, live);
+	if (live->raw_exit_attached)
+		unregister_trace_sched_irq_preempt_exit(irqexit_observe_exit, live);
 	tracepoint_synchronize_unregister();
 	if (live->worker)
 		kthread_stop(live->worker);
@@ -316,6 +364,7 @@ static void rv_test_irqexit_live(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, 0,
 			register_trace_event_irqexit(irqexit_observe_event, live));
 	live->observer_attached = true;
+	KUNIT_ASSERT_EQ(test, irqexit_observe_boundaries(live), 0);
 
 	mon->enabled = 1;
 
@@ -341,6 +390,9 @@ static void rv_test_irqexit_live(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, switches_out, switches_in);
 	KUNIT_EXPECT_GT(test, switches_out, first_switches);
 	KUNIT_EXPECT_TRUE(test, worker_done);
+	KUNIT_EXPECT_GE(test, live->raw_entries, 2U);
+	KUNIT_EXPECT_GE(test, live->raw_exits, 2U);
+	KUNIT_EXPECT_EQ(test, live->bad_raw_context, 0U);
 	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
 	kunit_info(test, "live IRQ-exit entries=%u exits=%u switches=%u\n",
 		   entries, exits, switches_out);
@@ -392,6 +444,7 @@ static void rv_test_irqexit_migrate(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, 0,
 			register_trace_event_irqexit(irqexit_observe_event, live));
 	live->observer_attached = true;
+	KUNIT_ASSERT_EQ(test, irqexit_observe_boundaries(live), 0);
 	mon->enabled = 1;
 
 	KUNIT_ASSERT_EQ(test, preempt_count(), 0);
@@ -422,6 +475,9 @@ static void rv_test_irqexit_migrate(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, live->exit_cpu, live->target_cpu);
 	/* Check actual resumed execution independently of the RV observer. */
 	KUNIT_EXPECT_EQ(test, resumed_cpu, live->target_cpu);
+	KUNIT_EXPECT_GT(test, live->raw_entries, 0U);
+	KUNIT_EXPECT_GT(test, live->raw_exits, 0U);
+	KUNIT_EXPECT_EQ(test, live->bad_raw_context, 0U);
 	restore_result = set_cpus_allowed_ptr(current, &live->saved_mask);
 	KUNIT_EXPECT_EQ(test, restore_result, 0);
 	affinity_restored = !restore_result &&
