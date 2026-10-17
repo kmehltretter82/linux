@@ -11,7 +11,6 @@
 #define MODULE_NAME "irqstate"
 
 #include <trace/events/irq.h>
-#include <trace/events/sched.h>
 #include <rv_trace.h>
 #include <monitors/irqentry/irqentry.h>
 
@@ -38,16 +37,25 @@ static inline bool ha_verify_guards(struct ha_monitor *ha_mon,
 {
 	bool res = true;
 
-	if (curr_state == consistent_irqstate && event == hardirq_entry_irqstate)
-		res = ha_get_env(ha_mon, hardirq_irqstate, time_ns) > 0;
-	else if (curr_state == consistent_irqstate && event == hardirq_exit_irqstate)
-		res = ha_get_env(ha_mon, hardirq_irqstate, time_ns) > 0;
-	else if (curr_state == consistent_irqstate && event == schedule_entry_irqstate)
-		res = ha_get_env(ha_mon, hardirq_irqstate, time_ns) == 0;
-	else if (curr_state == consistent_irqstate && event == softirq_entry_irqstate)
-		res = ha_get_env(ha_mon, serving_softirq_irqstate, time_ns) == 1;
-	else if (curr_state == consistent_irqstate && event == softirq_exit_irqstate)
-		res = ha_get_env(ha_mon, serving_softirq_irqstate, time_ns) == 1;
+	if (curr_state == in_hardirq_irqstate && event == hardirq_exit_irqstate)
+		res = ha_get_env(ha_mon, hardirq_irqstate, time_ns) > 0 &&
+		      ha_get_env(ha_mon, serving_softirq_irqstate, time_ns) == 0;
+	else if (curr_state == idle_irqstate && event == hardirq_entry_irqstate)
+		res = ha_get_env(ha_mon, hardirq_irqstate, time_ns) > 0 &&
+		      ha_get_env(ha_mon, serving_softirq_irqstate, time_ns) == 0;
+	else if (curr_state == idle_irqstate && event == softirq_entry_irqstate)
+		res = ha_get_env(ha_mon, hardirq_irqstate, time_ns) == 0 &&
+		      ha_get_env(ha_mon, serving_softirq_irqstate, time_ns) == 1;
+	else if (curr_state == in_softirq_irqstate && event == hardirq_entry_irqstate)
+		res = ha_get_env(ha_mon, hardirq_irqstate, time_ns) > 0 &&
+		      ha_get_env(ha_mon, serving_softirq_irqstate, time_ns) == 1;
+	else if (curr_state == in_softirq_irqstate && event == softirq_exit_irqstate)
+		res = ha_get_env(ha_mon, hardirq_irqstate, time_ns) == 0 &&
+		      ha_get_env(ha_mon, serving_softirq_irqstate, time_ns) == 1;
+	else if (curr_state == hardirq_from_softirq_irqstate &&
+		 event == hardirq_exit_irqstate)
+		res = ha_get_env(ha_mon, hardirq_irqstate, time_ns) > 0 &&
+		      ha_get_env(ha_mon, serving_softirq_irqstate, time_ns) == 1;
 
 	return res;
 }
@@ -59,48 +67,67 @@ static bool ha_verify_constraint(struct ha_monitor *ha_mon,
 	return ha_verify_guards(ha_mon, curr_state, event, next_state, time_ns);
 }
 
-static void handle_hardirq_entry(void *data, int irq, struct irqaction *action)
+static void handle_hardirq_entry(void *data, unsigned int depth)
 {
-	da_handle_start_run_event(hardirq_entry_irqstate);
+	if (!hardirq_count()) {
+		da_handle_start_run_event(hardirq_entry_irqstate);
+		return;
+	}
+
+	/* Nested hardirqs leave the outer context state unchanged. */
+	if (depth > 1)
+		return;
+
+	if (in_serving_softirq())
+		da_handle_event(hardirq_entry_irqstate);
+	else
+		da_handle_start_run_event(hardirq_entry_irqstate);
 }
 
-static void handle_hardirq_exit(void *data, int irq, struct irqaction *action,
-				int ret)
+static void handle_hardirq_exit(void *data, unsigned int depth)
 {
-	da_handle_start_run_event(hardirq_exit_irqstate);
+	if (!hardirq_count()) {
+		da_handle_start_run_event(hardirq_exit_irqstate);
+		return;
+	}
+
+	/* Nested hardirqs leave the outer context state unchanged. */
+	if (depth > 1)
+		return;
+
+	if (in_serving_softirq())
+		da_handle_event(hardirq_exit_irqstate);
+	else
+		da_handle_start_event(hardirq_exit_irqstate);
 }
 
-static void handle_schedule_entry(void *data, bool preempt)
-{
-	da_handle_start_run_event(schedule_entry_irqstate);
-}
-
-static void handle_softirq_entry(void *data, unsigned int vec_nr)
+static void handle_softirq_entry(void *data, bool serving)
 {
 	da_handle_start_run_event(softirq_entry_irqstate);
 }
 
-static void handle_softirq_exit(void *data, unsigned int vec_nr)
+static void handle_softirq_exit(void *data, bool serving)
 {
-	da_handle_start_run_event(softirq_exit_irqstate);
+	if (in_serving_softirq())
+		da_handle_start_event(softirq_exit_irqstate);
+	else
+		da_handle_start_run_event(softirq_exit_irqstate);
 }
 
 static void attach_irqstate(void)
 {
-	rv_attach_trace_probe("irqstate", irq_handler_entry, handle_hardirq_entry);
-	rv_attach_trace_probe("irqstate", irq_handler_exit, handle_hardirq_exit);
-	rv_attach_trace_probe("irqstate", sched_entry_tp, handle_schedule_entry);
-	rv_attach_trace_probe("irqstate", softirq_entry, handle_softirq_entry);
-	rv_attach_trace_probe("irqstate", softirq_exit, handle_softirq_exit);
+	rv_attach_trace_probe("irqstate", hardirq_context_entry, handle_hardirq_entry);
+	rv_attach_trace_probe("irqstate", hardirq_context_exit, handle_hardirq_exit);
+	rv_attach_trace_probe("irqstate", softirq_context_entry, handle_softirq_entry);
+	rv_attach_trace_probe("irqstate", softirq_context_exit, handle_softirq_exit);
 }
 
 static void detach_irqstate(void)
 {
-	rv_detach_trace_probe("irqstate", irq_handler_entry, handle_hardirq_entry);
-	rv_detach_trace_probe("irqstate", irq_handler_exit, handle_hardirq_exit);
-	rv_detach_trace_probe("irqstate", sched_entry_tp, handle_schedule_entry);
-	rv_detach_trace_probe("irqstate", softirq_entry, handle_softirq_entry);
-	rv_detach_trace_probe("irqstate", softirq_exit, handle_softirq_exit);
+	rv_detach_trace_probe("irqstate", hardirq_context_entry, handle_hardirq_entry);
+	rv_detach_trace_probe("irqstate", hardirq_context_exit, handle_hardirq_exit);
+	rv_detach_trace_probe("irqstate", softirq_context_entry, handle_softirq_entry);
+	rv_detach_trace_probe("irqstate", softirq_context_exit, handle_softirq_exit);
 }
 
 static int enable_irqstate(void)
@@ -127,7 +154,7 @@ static void disable_irqstate(void)
 
 static struct rv_monitor rv_this = {
 	.name = "irqstate",
-	.description = "IRQ and softirq events agree with execution context.",
+	.description = "IRQ context boundaries agree with execution state.",
 	.enable = enable_irqstate,
 	.disable = disable_irqstate,
 	.reset = da_monitor_reset_all,
@@ -161,7 +188,6 @@ const struct rv_irqstate_ops rv_irqstate_ops = {
 	.detach = detach_irqstate,
 	.handle_hardirq_entry = handle_hardirq_entry,
 	.handle_hardirq_exit = handle_hardirq_exit,
-	.handle_schedule_entry = handle_schedule_entry,
 	.handle_softirq_entry = handle_softirq_entry,
 	.handle_softirq_exit = handle_softirq_exit,
 };

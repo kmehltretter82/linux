@@ -7,8 +7,8 @@ config RV_MON_IRQSTATE
 	select HA_MON_EVENTS_IMPLICIT
 	bool "irqstate monitor"
 	help
-	  Verify that hardirq, softirq, and scheduler events agree with the
-	  execution context recorded in preempt count.
+	  Verify that generic hardirq and softirq context boundaries agree
+	  with the execution context recorded in preempt count.
 
 	  For further information, see:
 	    Documentation/trace/rv/monitor_irqentry.rst

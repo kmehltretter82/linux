@@ -22,8 +22,9 @@ of generic hardirq state.
 Monitor irqstate
 ----------------
 
-The ``irqstate`` monitor checks that independently observable kernel events
-agree with the corresponding preempt-count context:
+The ``irqstate`` monitor checks the ordering of the complete generic hardirq
+and softirq contexts.  Each boundary must agree with the corresponding
+preempt-count state:
 
 .. list-table:: Event and required context
    :header-rows: 1
@@ -31,35 +32,48 @@ agree with the corresponding preempt-count context:
    * - Kernel event
      - Model event
      - Required environment
-   * - ``irq_handler_entry``
+   * - ``hardirq_context_entry``
      - ``hardirq_entry``
-     - ``hardirq > 0``
-   * - ``irq_handler_exit``
+     - ``hardirq > 0``; serving-softirq state selects the source state
+   * - ``hardirq_context_exit``
      - ``hardirq_exit``
-     - ``hardirq > 0``
-   * - ``softirq_entry``
+     - ``hardirq > 0``; serving-softirq state selects the destination state
+   * - ``softirq_context_entry``
      - ``softirq_entry``
-     - ``serving_softirq == 1``
-   * - ``softirq_exit``
+     - ``hardirq == 0 && serving_softirq == 1``
+   * - ``softirq_context_exit``
      - ``softirq_exit``
-     - ``serving_softirq == 1``
-   * - scheduler entry
-     - ``schedule_entry``
-     - ``hardirq == 0``
+     - ``hardirq == 0 && serving_softirq == 1``
 
 ``serving_softirq`` uses ``in_serving_softirq()``.  It therefore distinguishes
 actual softirq execution from a task which merely disabled bottom halves.  The
-hardirq condition uses the hardirq component of ``preempt_count`` and is valid
-for PREEMPT_RT as well as non-RT kernels.
+hardirq condition uses the hardirq component of ``preempt_count``.
 
-NMI-capable IRQ paths can emit the same IRQ-handler tracepoints.  Generic NMI
-entry accounting adds ``HARDIRQ_OFFSET`` together with ``NMI_OFFSET``, so those
-events satisfy the hardirq guard without an architecture-specific exception.
-The monitor does not otherwise attempt to model NMI entry and exit.
+The model has four states: ``idle``, ``in_hardirq``, ``in_softirq``, and
+``hardirq_from_softirq``.  It accepts these outer-context sequences::
 
-The model is a one-state hybrid automaton.  Every event is a self-transition
-guarded by the required execution context.  A false guard invokes the selected
-RV reactor and emits the monitor's environment-error trace event.
+  idle -> in_hardirq -> idle
+  idle -> in_softirq -> idle
+  in_softirq -> hardirq_from_softirq -> in_softirq
+
+Hardirq depth greater than one is collapsed into the surrounding hardirq
+state.  The depth comes from the existing hardirq component, so the monitor
+does not maintain a second counter which could wrap independently.
+
+The boundary events run after entry state has been established and before it
+is removed.  A false transition or guard invokes the selected RV reactor and
+emits the monitor's error trace event.
+
+Synchronization
+---------------
+
+Enabling a per-CPU monitor does not imply that the CPU is in task context.
+An outer hardirq or softirq entry from a known idle context starts the model
+and consumes the event.  An outer exit can instead establish the idle state
+without consuming an unmatched event when monitoring starts in the middle of
+that context.  If monitoring starts while a hardirq interrupts a softirq, the
+hardirq pair is ignored until the enclosing softirq exit establishes the idle
+state.
 
 Relationship to sched/sts
 -------------------------
@@ -68,29 +82,59 @@ The scheduler ``sts`` monitor models the ordering of IRQ disable/enable,
 scheduler entry/exit, and task switches.  It uses ``irq_handler_entry`` and
 selected x86 vector events to refine that scheduler model.
 
-``irqstate`` does not reproduce that ordering model.  It directly samples the
-hardirq or serving-softirq component at an IRQ, softirq, or scheduler event.
-It also observes IRQ-handler exits and both softirq action boundaries, which
-``sts`` does not consume.
+``irqstate`` does not consume IRQ action or scheduler events.  It observes the
+generic context boundaries instead, so multiple actions in one interrupt and
+an action dispatched through ``generic_handle_irq_safe()`` do not change its
+state.  IRQ-exit scheduling requires a separate monitor and event contract.
+
+.. list-table:: Monitor coverage
+   :header-rows: 1
+
+   * - Property or event
+     - ``sched/sts``
+     - ``irqentry/irqstate``
+   * - IRQ disable and enable ordering
+     - yes
+     - no
+   * - IRQ action entry
+     - yes
+     - no
+   * - scheduler entry, exit, and task switch
+     - yes
+     - no
+   * - complete generic hardirq context
+     - no
+     - yes
+   * - complete serving-softirq context
+     - no
+     - yes
+   * - hardirq interruption of a softirq
+     - no
+     - yes
 
 Coverage limits
 ---------------
 
-The generic IRQ tracepoints describe individual IRQ actions rather than the
-physical interrupt entry and return.  Consequently this first monitor cannot
-observe:
+The context tracepoints are emitted by ``irq_enter_rcu()`` and
+``irq_exit_rcu()`` and by the generic softirq processing loop.  Consequently
+this monitor cannot observe:
 
 - the early architecture entry interval before ``irq_enter_rcu()``;
-- local vectors, IPIs, or timer interrupts which do not execute a normal IRQ
-  action, except that an attempted schedule with hardirq state active is still
-  checked; or
+- architecture or special-vector paths which use only
+  ``__irq_enter_raw()`` and ``__irq_exit_raw()`` (including x86 simple system
+  vectors);
+- NMI entry and exit; or
 - the complete ordering of generic IRQ teardown, inline softirq processing,
   and IRQ-exit rescheduling.
 
-Those limitations are intentional.  Future monitors can add generic safe
-entry/exit boundary events, and an architecture may later provide a deferred
-raw-entry marker.  Such additions require separate event contracts and do not
-change the meaning of ``irqstate``.
+The standard hardirq tracepoints describe individual IRQ actions rather than
+physical interrupt boundaries.  They are deliberately not used: synthetic
+dispatch and software resend can execute an action outside hardirq context,
+and one interrupt can execute several actions.
+
+These limitations are intentional.  A later architecture hook may provide a
+deferred raw-entry marker for the very-early interval.  Such an addition needs
+a separate event contract and does not change the meaning of ``irqstate``.
 
 Enabling the monitor
 --------------------

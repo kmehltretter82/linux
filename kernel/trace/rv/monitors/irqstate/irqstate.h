@@ -8,7 +8,10 @@
 #define MONITOR_NAME irqstate
 
 enum states_irqstate {
-	consistent_irqstate,
+	idle_irqstate,
+	hardirq_from_softirq_irqstate,
+	in_hardirq_irqstate,
+	in_softirq_irqstate,
 	state_max_irqstate,
 };
 
@@ -17,7 +20,6 @@ enum states_irqstate {
 enum events_irqstate {
 	hardirq_entry_irqstate,
 	hardirq_exit_irqstate,
-	schedule_entry_irqstate,
 	softirq_entry_irqstate,
 	softirq_exit_irqstate,
 	event_max_irqstate,
@@ -43,12 +45,14 @@ struct automaton_irqstate {
 
 static const struct automaton_irqstate automaton_irqstate = {
 	.state_names = {
-		"consistent",
+		"idle",
+		"hardirq_from_softirq",
+		"in_hardirq",
+		"in_softirq",
 	},
 	.event_names = {
 		"hardirq_entry",
 		"hardirq_exit",
-		"schedule_entry",
 		"softirq_entry",
 		"softirq_exit",
 	},
@@ -58,13 +62,30 @@ static const struct automaton_irqstate automaton_irqstate = {
 	},
 	.function = {
 		{
-			consistent_irqstate,
-			consistent_irqstate,
-			consistent_irqstate,
-			consistent_irqstate,
-			consistent_irqstate,
+			in_hardirq_irqstate,
+			INVALID_STATE,
+			in_softirq_irqstate,
+			INVALID_STATE,
+		},
+		{
+			INVALID_STATE,
+			in_softirq_irqstate,
+			INVALID_STATE,
+			INVALID_STATE,
+		},
+		{
+			INVALID_STATE,
+			idle_irqstate,
+			INVALID_STATE,
+			INVALID_STATE,
+		},
+		{
+			hardirq_from_softirq_irqstate,
+			INVALID_STATE,
+			INVALID_STATE,
+			idle_irqstate,
 		},
 	},
-	.initial_state = consistent_irqstate,
-	.final_states = { 1 },
+	.initial_state = idle_irqstate,
+	.final_states = { 1, 0, 0, 0 },
 };
