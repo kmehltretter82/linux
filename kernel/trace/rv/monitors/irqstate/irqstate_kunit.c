@@ -21,12 +21,15 @@ enum irqstate_softirq_test {
 	IRQSTATE_SOFTIRQ_DOUBLE_ENTRY,
 	IRQSTATE_SOFTIRQ_DOUBLE_EXIT,
 	IRQSTATE_SOFTIRQ_TRACEPOINT_ONLY,
+	IRQSTATE_SOFTIRQ_SYNC,
+	IRQSTATE_SOFTIRQ_SYNC_INTERRUPTED,
 };
 
 struct irqstate_softirq_ctx {
 	struct tasklet_struct tasklet;
 	struct completion done;
 	enum irqstate_softirq_test test;
+	int reactions_after_sync;
 };
 
 static void run_irqstate_softirq(struct tasklet_struct *tasklet)
@@ -35,6 +38,30 @@ static void run_irqstate_softirq(struct tasklet_struct *tasklet)
 	unsigned long flags;
 
 	softirq_ctx = from_tasklet(softirq_ctx, tasklet, tasklet);
+
+	if (softirq_ctx->test == IRQSTATE_SOFTIRQ_SYNC ||
+	    softirq_ctx->test == IRQSTATE_SOFTIRQ_SYNC_INTERRUPTED) {
+		local_irq_save(flags);
+		rv_irqstate_ops.mon.rv_this->enabled = 0;
+		rv_irqstate_ops.handle_softirq_entry(NULL, true);
+		rv_irqstate_ops.mon.rv_this->reset();
+		rv_irqstate_ops.mon.rv_this->enabled = 1;
+		if (softirq_ctx->test == IRQSTATE_SOFTIRQ_SYNC_INTERRUPTED) {
+			__irq_enter_raw();
+			rv_irqstate_ops.handle_hardirq_entry(NULL, 1);
+			rv_irqstate_ops.handle_hardirq_exit(NULL, 1);
+			__irq_exit_raw();
+		}
+		/* The enclosing softirq exit establishes idle without an entry. */
+		rv_irqstate_ops.handle_softirq_exit(NULL, true);
+		softirq_ctx->reactions_after_sync = active_ctx->reactions;
+		/* Once synchronized, an unmatched hardirq exit must be rejected. */
+		__irq_enter_raw();
+		rv_irqstate_ops.handle_hardirq_exit(NULL, 1);
+		__irq_exit_raw();
+		local_irq_restore(flags);
+		goto out;
+	}
 
 	if (softirq_ctx->test == IRQSTATE_SOFTIRQ_TRACEPOINT_ONLY)
 		goto out;
@@ -59,6 +86,8 @@ static void run_irqstate_softirq(struct tasklet_struct *tasklet)
 	case IRQSTATE_SOFTIRQ_VALID:
 		break;
 	case IRQSTATE_SOFTIRQ_TRACEPOINT_ONLY:
+	case IRQSTATE_SOFTIRQ_SYNC:
+	case IRQSTATE_SOFTIRQ_SYNC_INTERRUPTED:
 		unreachable();
 	}
 
@@ -67,10 +96,11 @@ out:
 	complete(&softirq_ctx->done);
 }
 
-static bool exercise_irqstate_softirq(enum irqstate_softirq_test test)
+static bool run_irqstate_softirq_case(enum irqstate_softirq_test test, int *sync_rx)
 {
 	struct irqstate_softirq_ctx softirq_ctx = {
 		.test = test,
+		.reactions_after_sync = -1,
 	};
 	unsigned long completed;
 
@@ -79,8 +109,15 @@ static bool exercise_irqstate_softirq(enum irqstate_softirq_test test)
 	tasklet_schedule(&softirq_ctx.tasklet);
 	completed = wait_for_completion_timeout(&softirq_ctx.done, HZ);
 	tasklet_kill(&softirq_ctx.tasklet);
+	if (sync_rx)
+		*sync_rx = softirq_ctx.reactions_after_sync;
 
 	return completed != 0;
+}
+
+static bool exercise_irqstate_softirq(enum irqstate_softirq_test test)
+{
+	return run_irqstate_softirq_case(test, NULL);
 }
 
 static void attach_irqstate_test_probes(void)
@@ -212,6 +249,88 @@ static void rv_test_irqstate(struct kunit *test)
 	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
 }
 
+static void rv_test_irqstate_depth(struct kunit *test)
+{
+	struct rv_kunit_ctx *ctx = test->priv;
+	unsigned int max_depth = HARDIRQ_MASK >> HARDIRQ_SHIFT;
+	unsigned int observed_depth, saved_count;
+	unsigned long flags;
+
+	prepare_test(test, &rv_irqstate_ops.mon);
+	guard(migrate)();
+	saved_count = preempt_count();
+	local_irq_save(flags);
+	for (unsigned int depth = 1; depth <= max_depth; depth++) {
+		__irq_enter_raw();
+		rv_irqstate_ops.handle_hardirq_entry(NULL, depth);
+	}
+	observed_depth = hardirq_count() >> HARDIRQ_SHIFT;
+	for (unsigned int depth = max_depth; depth; depth--) {
+		rv_irqstate_ops.handle_hardirq_exit(NULL, depth);
+		__irq_exit_raw();
+	}
+	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
+	/* A silent adapter cannot pass: the completed outer pair armed idle. */
+	__irq_enter_raw();
+	RV_KUNIT_EXPECT_REACTION_HERE(test, ctx)
+		rv_irqstate_ops.handle_hardirq_exit(NULL, 1);
+	__irq_exit_raw();
+	local_irq_restore(flags);
+	KUNIT_EXPECT_EQ(test, observed_depth, max_depth);
+	KUNIT_EXPECT_EQ(test, preempt_count(), saved_count);
+	kunit_info(test, "hardirq max_depth=%u observed=%u restored=%u\n",
+		   max_depth, observed_depth, preempt_count() == saved_count);
+}
+
+static void rv_test_irqstate_sync(struct kunit *test)
+{
+	struct rv_kunit_ctx *ctx = test->priv;
+	struct rv_monitor *mon = rv_irqstate_ops.mon.rv_this;
+	unsigned int saved_count;
+	unsigned long flags;
+	int expected, rx_at_sync;
+	bool completed;
+
+	prepare_test(test, &rv_irqstate_ops.mon);
+	guard(migrate)();
+	saved_count = preempt_count();
+	for (unsigned int depth = 1; depth <= 2; depth++) {
+		local_irq_save(flags);
+		mon->enabled = 0;
+		for (unsigned int level = 1; level <= depth; level++) {
+			__irq_enter_raw();
+			rv_irqstate_ops.handle_hardirq_entry(NULL, level);
+		}
+		mon->reset();
+		mon->enabled = 1;
+		for (unsigned int level = depth; level; level--) {
+			rv_irqstate_ops.handle_hardirq_exit(NULL, level);
+			__irq_exit_raw();
+		}
+		RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
+		/* The first unmatched exit after synchronization must now fail. */
+		__irq_enter_raw();
+		RV_KUNIT_EXPECT_REACTION_HERE(test, ctx)
+			rv_irqstate_ops.handle_hardirq_exit(NULL, 1);
+		__irq_exit_raw();
+		local_irq_restore(flags);
+	}
+
+	expected = ctx->expected;
+	completed = run_irqstate_softirq_case(IRQSTATE_SOFTIRQ_SYNC, &rx_at_sync);
+	KUNIT_ASSERT_TRUE(test, completed);
+	KUNIT_EXPECT_EQ(test, rx_at_sync, expected);
+	RV_KUNIT_EXPECT_REACTION(test, ctx);
+	expected = ctx->expected;
+	completed = run_irqstate_softirq_case(IRQSTATE_SOFTIRQ_SYNC_INTERRUPTED, &rx_at_sync);
+	KUNIT_ASSERT_TRUE(test, completed);
+	KUNIT_EXPECT_EQ(test, rx_at_sync, expected);
+	RV_KUNIT_EXPECT_REACTION(test, ctx);
+	KUNIT_EXPECT_EQ(test, preempt_count(), saved_count);
+	kunit_info(test, "sync hardirq=1 nested=2 softirq=1 interrupted_softirq=1 restored=%u\n",
+		   preempt_count() == saved_count);
+}
+
 struct irqstate_preempt_ctx {
 	struct tasklet_struct tasklet;
 	struct task_struct *worker;
@@ -306,5 +425,7 @@ static void rv_test_irqstate_preempt(struct kunit *test)
 
 #else
 #define rv_test_irqstate rv_test_stub
+#define rv_test_irqstate_depth rv_test_stub
+#define rv_test_irqstate_sync rv_test_stub
 #define rv_test_irqstate_preempt rv_test_stub
 #endif

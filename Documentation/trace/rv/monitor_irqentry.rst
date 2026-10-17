@@ -173,6 +173,21 @@ entry/exit events used by ``sts``.
 KUnit scheduling coverage
 -------------------------
 
+``rv_test_irqstate_depth`` constructs every representable hardirq nesting
+level with the raw accounting helpers, then unwinds the complete stack. It
+checks the actual deepest component and restoration of the original count.
+An unmatched exit after the valid cycle must fail, so ignoring every event
+cannot satisfy the test. This is maximum valid nesting, not live counter
+overflow or physical interrupt-stack recursion.
+
+``rv_test_irqstate_sync`` resets and enables the bare adapter inside single
+and nested hardirq contexts, inside a real serving-softirq callback, and
+inside a hardirq interrupting that callback. Valid unwinding must establish
+idle without a reaction. A separate unmatched exit must then react exactly
+once. The softirq cases snapshot reactions before the invalid control, so
+an error on the valid sequence cannot replace the expected later error.
+These are adapter synchronization tests, not concurrent tracefs writes.
+
 With built-in RV KUnit tests, ``rv_test_irqexit_live`` enters the real
 ``preempt_schedule_irq()`` helper with and without a task switch on one CPU.
 ``rv_test_irqexit_migrate`` instead wakes a same-CPU FIFO worker which moves
