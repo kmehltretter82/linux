@@ -172,8 +172,15 @@ static struct kunit_case rv_mon_test_cases[] = {
 	KUNIT_CASE(rv_test_irqexit),
 	KUNIT_CASE(rv_test_irqexit_invalid),
 	KUNIT_CASE(rv_test_irqexit_sync),
+#if IS_REACHABLE(CONFIG_RV_MON_IRQEXIT) && !defined(MODULE)
+	KUNIT_CASE_PARAM_WITH_INIT(rv_test_irqexit_live, kunit_array_gen_params,
+				   irqexit_live_fixture_init, irqexit_live_fixture_exit),
+	KUNIT_CASE_PARAM_WITH_INIT(rv_test_irqexit_migrate, kunit_array_gen_params,
+				   irqexit_live_fixture_init, irqexit_live_fixture_exit),
+#else
 	KUNIT_CASE(rv_test_irqexit_live),
 	KUNIT_CASE(rv_test_irqexit_migrate),
+#endif
 	KUNIT_CASE(rv_test_opid),
 	KUNIT_CASE(rv_test_nomiss),
 	KUNIT_CASE(rv_test_pagefault),

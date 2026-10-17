@@ -8,6 +8,7 @@
 #include <linux/kthread.h>
 #include <linux/rv.h>
 #include <linux/sched.h>
+#include <linux/sched/task.h>
 #include <rv/kunit.h>
 #include <rv_trace.h>
 
@@ -164,6 +165,7 @@ static void rv_test_irqexit_sync(struct kunit *test)
 struct irqexit_live_ctx {
 	struct task_struct *owner;
 	struct task_struct *worker;
+	const char *skip_reason;
 	struct completion worker_done;
 	unsigned int entries;
 	unsigned int exits;
@@ -178,11 +180,46 @@ struct irqexit_live_ctx {
 	cpumask_t saved_mask;
 	cpumask_t test_mask;
 	bool migrate;
-	bool cpus_locked;
 	bool affinity_changed;
 	bool observer_attached;
-	bool monitor_enabled;
 };
+
+/* Parent fixtures run in the suite runner, which owns rv_interface_lock. */
+static int irqexit_live_fixture_init(struct kunit *test)
+{
+	struct rv_monitor *mon = rv_irqexit_ops.mon.rv_this;
+	struct irqexit_live_ctx *live;
+	int ret;
+
+	if (mon->enabled)
+		return -EBUSY;
+	live = kunit_kzalloc(test, sizeof(*live), GFP_KERNEL);
+	if (!live)
+		return -ENOMEM;
+
+	cpus_read_lock();
+	ret = mon->enable();
+	if (ret) {
+		cpus_read_unlock();
+		kunit_kfree(test, live);
+		return ret;
+	}
+	kunit_register_params_array(test, live, 1, NULL);
+	return 0;
+}
+
+static void irqexit_live_fixture_exit(struct kunit *test)
+{
+	const struct irqexit_live_ctx *live = test->params_array.params;
+	struct rv_monitor *mon = rv_irqexit_ops.mon.rv_this;
+
+	mon->enabled = 0;
+	mon->disable();
+	cpus_read_unlock();
+	/* Retain the child's explicit skip reason on the parent case. */
+	if (live->skip_reason)
+		kunit_mark_skipped(test, "%s", live->skip_reason);
+}
 
 static int irqexit_live_worker(void *data)
 {
@@ -231,18 +268,16 @@ static void irqexit_live_cleanup(void *data)
 	struct rv_monitor *mon = rv_irqexit_ops.mon.rv_this;
 
 	mon->enabled = 0;
-	if (live->monitor_enabled)
-		mon->disable();
 	if (live->observer_attached)
 		unregister_trace_event_irqexit(irqexit_observe_event, live);
 	tracepoint_synchronize_unregister();
 	if (live->worker)
 		kthread_stop(live->worker);
-	if (live->affinity_changed)
+	if (live->affinity_changed && !(READ_ONCE(live->owner->flags) & PF_EXITING))
 		KUNIT_EXPECT_EQ(kunit_get_current_test(),
-				set_cpus_allowed_ptr(current, &live->saved_mask), 0);
-	if (live->cpus_locked)
-		cpus_read_unlock();
+				set_cpus_allowed_ptr(live->owner, &live->saved_mask), 0);
+	put_task_struct(live->owner);
+	live->owner = NULL;
 
 	RV_KUNIT_EXPECT_NO_REACTION(kunit_get_current_test(), active_ctx);
 	mon->react = mon->reactor ? mon->reactor->react : NULL;
@@ -254,7 +289,7 @@ static void rv_test_irqexit_live(struct kunit *test)
 {
 	struct rv_monitor *mon = rv_irqexit_ops.mon.rv_this;
 	struct rv_kunit_ctx *ctx = test->priv;
-	struct irqexit_live_ctx *live;
+	struct irqexit_live_ctx *live = (void *)test->param_value;
 	struct task_struct *worker;
 	unsigned int entries, exits, switches_out, switches_in;
 	unsigned int first_entries, first_switches;
@@ -262,9 +297,8 @@ static void rv_test_irqexit_live(struct kunit *test)
 	bool worker_done;
 
 	KUNIT_ASSERT_FALSE(test, mon->enabled);
-	live = kunit_kzalloc(test, sizeof(*live), GFP_KERNEL);
-	KUNIT_ASSERT_NOT_NULL(test, live);
 	live->owner = current;
+	get_task_struct(live->owner);
 	init_completion(&live->worker_done);
 
 	active_ctx = ctx;
@@ -283,9 +317,6 @@ static void rv_test_irqexit_live(struct kunit *test)
 			register_trace_event_irqexit(irqexit_observe_event, live));
 	live->observer_attached = true;
 
-	/* The suite holds rv_interface_lock: allocate and reset a real slot. */
-	KUNIT_ASSERT_EQ(test, mon->enable(), 0);
-	live->monitor_enabled = true;
 	mon->enabled = 1;
 
 	KUNIT_ASSERT_EQ(test, preempt_count(), 0);
@@ -313,37 +344,39 @@ static void rv_test_irqexit_live(struct kunit *test)
 	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
 	kunit_info(test, "live IRQ-exit entries=%u exits=%u switches=%u\n",
 		   entries, exits, switches_out);
+	mon->enabled = 0;
 }
 
 static void rv_test_irqexit_migrate(struct kunit *test)
 {
 	struct rv_monitor *mon = rv_irqexit_ops.mon.rv_this;
 	struct rv_kunit_ctx *ctx = test->priv;
-	struct irqexit_live_ctx *live;
+	struct irqexit_live_ctx *live = (void *)test->param_value;
 	struct task_struct *worker;
 	unsigned int source_cpu, resumed_cpu;
 	unsigned long flags;
+	bool affinity_restored;
+	int restore_result;
 
 	KUNIT_ASSERT_FALSE(test, mon->enabled);
-	live = kunit_kzalloc(test, sizeof(*live), GFP_KERNEL);
-	KUNIT_ASSERT_NOT_NULL(test, live);
 	live->owner = current;
+	get_task_struct(live->owner);
 	init_completion(&live->worker_done);
 	active_ctx = ctx;
 	mon->react = rv_kunit_mock_react;
 	rv_mock_current(NULL);
 	KUNIT_ASSERT_EQ(test, 0,
 			kunit_add_action_or_reset(test, irqexit_live_cleanup, live));
-	cpus_read_lock();
-	live->cpus_locked = true;
 	if (num_online_cpus() < 2) {
-		kunit_skip(test, "Requires two online CPUs");
+		live->skip_reason = "Requires two online CPUs";
+		kunit_skip(test, "%s", live->skip_reason);
 		return;
 	}
 	cpumask_copy(&live->saved_mask, current->cpus_ptr);
 	cpumask_and(&live->test_mask, &live->saved_mask, cpu_online_mask);
 	if (cpumask_weight(&live->test_mask) < 2) {
-		kunit_skip(test, "Requires two allowed online CPUs");
+		live->skip_reason = "Requires two allowed online CPUs";
+		kunit_skip(test, "%s", live->skip_reason);
 		return;
 	}
 	source_cpu = cpumask_first(&live->test_mask);
@@ -359,8 +392,6 @@ static void rv_test_irqexit_migrate(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, 0,
 			register_trace_event_irqexit(irqexit_observe_event, live));
 	live->observer_attached = true;
-	KUNIT_ASSERT_EQ(test, mon->enable(), 0);
-	live->monitor_enabled = true;
 	mon->enabled = 1;
 
 	KUNIT_ASSERT_EQ(test, preempt_count(), 0);
@@ -391,10 +422,18 @@ static void rv_test_irqexit_migrate(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, live->exit_cpu, live->target_cpu);
 	/* Check actual resumed execution independently of the RV observer. */
 	KUNIT_EXPECT_EQ(test, resumed_cpu, live->target_cpu);
+	restore_result = set_cpus_allowed_ptr(current, &live->saved_mask);
+	KUNIT_EXPECT_EQ(test, restore_result, 0);
+	affinity_restored = !restore_result &&
+		cpumask_equal(current->cpus_ptr, &live->saved_mask);
+	KUNIT_EXPECT_TRUE(test, affinity_restored);
+	if (affinity_restored)
+		live->affinity_changed = false;
 	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
 	kunit_info(test, "live IRQ-exit migration cpu=%u->%u actual=%u entries=%u exits=%u switches=%u\n",
 		   live->entry_cpu, live->exit_cpu, resumed_cpu, live->entries, live->exits,
 		   live->switches_out);
+	kunit_info(test, "live IRQ-exit affinity restored=%u\n", affinity_restored);
 }
 #else
 static void rv_test_irqexit_live(struct kunit *test)

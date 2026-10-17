@@ -212,6 +212,13 @@ on the destination. It also samples the CPU on which the helper actually
 returned, independently of the RV observer, and restores the owner's
 original affinity during cleanup.
 
+The two live helper cases use single-element parameter fixtures. Monitor
+slot allocation and destruction, and CPU-hotplug read locking, run in the
+suite runner, which owns the RV interface mutex. The case body and its
+cleanup can run in different KUnit threads. The tests retain a task
+reference until the observer and worker are stopped; the migration case
+checks restoration of the tested task's affinity before that task exits.
+
 The migration case skips when fewer than two allowed CPUs are online, or
 when the tests are modules: the helper is not exported. These tests exercise
 the real helper and scheduler, but invoke the helper directly. They are not
