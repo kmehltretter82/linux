@@ -52,6 +52,53 @@ TRACE_EVENT(sched_kthread_stop_ret,
 	TP_printk("ret=%d", __entry->ret)
 );
 
+DECLARE_EVENT_CLASS(sched_irq_preempt,
+
+	TP_PROTO(struct task_struct *owner),
+
+	TP_ARGS(owner),
+
+	TP_STRUCT__entry(
+		__array(char, owner_comm, TASK_COMM_LEN)
+		__field(pid_t, owner_pid)
+		__field(unsigned long, pc)
+		__field(bool, irq_off)
+	),
+
+	TP_fast_assign(
+		memcpy(__entry->owner_comm, owner->comm, TASK_COMM_LEN);
+		__entry->owner_pid = owner->pid;
+		__entry->pc = preempt_count();
+		__entry->irq_off = irqs_disabled();
+	),
+
+	TP_printk("owner=%s/%d pc=0x%lx irq_off=%d",
+		  __entry->owner_comm, __entry->owner_pid,
+		  __entry->pc, __entry->irq_off)
+);
+
+/**
+ * sched_irq_preempt_entry - begin preempt_schedule_irq() processing
+ * @owner: task whose interrupted execution will resume after scheduling
+ *
+ * Emitted after entry assertions and context-tracking setup, with zero
+ * preempt count and local interrupts disabled. Exception-return paths can
+ * also use this scheduler entrypoint.
+ */
+DEFINE_EVENT(sched_irq_preempt, sched_irq_preempt_entry,
+	     TP_PROTO(struct task_struct *owner),
+	     TP_ARGS(owner));
+
+/**
+ * sched_irq_preempt_exit - original preempt_schedule_irq() invocation resumes
+ * @owner: task saved by the matching entry, possibly on a different CPU
+ *
+ * Emitted with local interrupts disabled before restoring context tracking.
+ */
+DEFINE_EVENT(sched_irq_preempt, sched_irq_preempt_exit,
+	     TP_PROTO(struct task_struct *owner),
+	     TP_ARGS(owner));
+
 /**
  * sched_kthread_work_queue_work - called when a work gets queued
  * @worker:	pointer to the kthread_worker
