@@ -595,6 +595,10 @@ struct softirq_action
 asmlinkage void do_softirq(void);
 asmlinkage void __do_softirq(void);
 
+#if IS_ENABLED(CONFIG_RV_MONITORS_KUNIT_TEST)
+void softirq_kunit_run_empty_worker(void);
+#endif
+
 #ifdef CONFIG_PREEMPT_RT
 extern void do_softirq_post_smp_call_flush(unsigned int was_pending);
 #else

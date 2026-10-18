@@ -10,6 +10,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #define INSTANTIATE_EXPORTED_INTERRUPT_DISABLE
+#include <kunit/visibility.h>
 #include <linux/export.h>
 #include <linux/kernel_stat.h>
 #include <linux/interrupt.h>
@@ -575,6 +576,24 @@ asmlinkage __visible void do_softirq(void)
 }
 
 #endif /* !CONFIG_PREEMPT_RT */
+
+#if IS_ENABLED(CONFIG_RV_MONITORS_KUNIT_TEST)
+/*
+ * Exercise the worker boundaries without entering handle_softirqs().
+ *
+ * The caller must be in preemptible task context with interrupts enabled and
+ * no active softirq context. Like run_ksoftirqd(), this returns with local
+ * interrupts enabled.
+ */
+void softirq_kunit_run_empty_worker(void)
+{
+	ksoftirqd_run_begin();
+	/* Preserve any pending work which raced with the test seam. */
+	wakeup_softirqd();
+	ksoftirqd_run_end();
+}
+EXPORT_SYMBOL_IF_KUNIT(softirq_kunit_run_empty_worker);
+#endif
 
 /*
  * We restart softirq processing for at most MAX_SOFTIRQ_RESTART times,

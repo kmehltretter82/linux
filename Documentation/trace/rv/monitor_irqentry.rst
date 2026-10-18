@@ -225,6 +225,16 @@ boundary probes require exactly one entry before the callback and one exit
 afterward, both with local interrupts disabled and live serving state set;
 the monitor must accept the pair and the original counts must be restored.
 
+``rv_test_irqstate_rt_empty_worker`` uses a KUnit-only seam around the same
+PREEMPT_RT worker entry and exit helpers, without calling
+``handle_softirqs()``. It requires exactly one accepted context pair and no
+``softirq_entry`` or ``softirq_exit`` action from the synthetic owner between
+those boundaries. The seam wakes ksoftirqd while interrupts are disabled so
+pending work which races with the test remains scheduled. This
+deterministically covers the owner's no-handler interval; it does not invoke
+the smpboot predicate or prove that the current task is the real ksoftirqd
+thread.
+
 With built-in RV KUnit tests, ``rv_test_irqexit_live`` enters the real
 ``preempt_schedule_irq()`` helper with and without a task switch on one CPU.
 ``rv_test_irqexit_migrate`` instead wakes a same-CPU FIFO worker which moves
