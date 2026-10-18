@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/completion.h>
+#include <linux/cpu.h>
 #include <linux/hardirq.h>
 #include <linux/interrupt.h>
 #include <linux/irqflags.h>
@@ -368,6 +369,7 @@ struct irqstate_empty_worker_ctx {
 	unsigned int action_exits;
 	unsigned int event_index;
 	bool armed;
+	bool real_worker;
 	bool inside_pair;
 	bool bad_order;
 	bool bad_boundary_context;
@@ -378,6 +380,16 @@ struct irqstate_empty_worker_ctx {
 	bool action_entry_attached;
 	bool action_exit_attached;
 };
+
+static bool irqstate_empty_worker_matches(struct irqstate_empty_worker_ctx *empty_ctx)
+{
+	/* Pairs with owner publication in both empty-worker test paths. */
+	if (!smp_load_acquire(&empty_ctx->armed) ||
+	    current != READ_ONCE(empty_ctx->owner))
+		return false;
+
+	return !empty_ctx->real_worker || softirq_kunit_empty_worker_active();
+}
 
 static void irqstate_inline_bh_entry(void *data, bool serving)
 {
@@ -512,7 +524,7 @@ static void irqstate_empty_worker_entry(void *data, bool serving)
 {
 	struct irqstate_empty_worker_ctx *empty_ctx = data;
 
-	if (!READ_ONCE(empty_ctx->armed) || current != empty_ctx->owner)
+	if (!irqstate_empty_worker_matches(empty_ctx))
 		return;
 	empty_ctx->entries++;
 	if (empty_ctx->event_index != 0 || empty_ctx->inside_pair)
@@ -521,7 +533,7 @@ static void irqstate_empty_worker_entry(void *data, bool serving)
 	empty_ctx->inside_pair = true;
 	if (!serving || !in_serving_softirq() || !irqs_disabled())
 		empty_ctx->bad_boundary_context = true;
-	if (raw_smp_processor_id() != empty_ctx->owner_cpu)
+	if (raw_smp_processor_id() != READ_ONCE(empty_ctx->owner_cpu))
 		empty_ctx->bad_boundary_cpu = true;
 }
 
@@ -529,7 +541,7 @@ static void irqstate_empty_worker_exit(void *data, bool serving)
 {
 	struct irqstate_empty_worker_ctx *empty_ctx = data;
 
-	if (!READ_ONCE(empty_ctx->armed) || current != empty_ctx->owner)
+	if (!irqstate_empty_worker_matches(empty_ctx))
 		return;
 	empty_ctx->exits++;
 	if (empty_ctx->event_index != 1 || !empty_ctx->inside_pair)
@@ -537,7 +549,7 @@ static void irqstate_empty_worker_exit(void *data, bool serving)
 	empty_ctx->event_index++;
 	if (!serving || !in_serving_softirq() || !irqs_disabled())
 		empty_ctx->bad_boundary_context = true;
-	if (raw_smp_processor_id() != empty_ctx->owner_cpu)
+	if (raw_smp_processor_id() != READ_ONCE(empty_ctx->owner_cpu))
 		empty_ctx->bad_boundary_cpu = true;
 	empty_ctx->actions_at_exit = empty_ctx->action_entries ||
 				     empty_ctx->action_exits;
@@ -548,7 +560,7 @@ static void irqstate_empty_worker_action_entry(void *data, unsigned int vec_nr)
 {
 	struct irqstate_empty_worker_ctx *empty_ctx = data;
 
-	if (!READ_ONCE(empty_ctx->armed) || current != empty_ctx->owner ||
+	if (!irqstate_empty_worker_matches(empty_ctx) ||
 	    !empty_ctx->inside_pair)
 		return;
 	(void)vec_nr;
@@ -561,7 +573,7 @@ static void irqstate_empty_worker_action_exit(void *data, unsigned int vec_nr)
 {
 	struct irqstate_empty_worker_ctx *empty_ctx = data;
 
-	if (!READ_ONCE(empty_ctx->armed) || current != empty_ctx->owner ||
+	if (!irqstate_empty_worker_matches(empty_ctx) ||
 	    !empty_ctx->inside_pair)
 		return;
 	(void)vec_nr;
@@ -590,8 +602,7 @@ static void irqstate_empty_worker_detach(void *data)
 	tracepoint_synchronize_unregister();
 }
 
-/* Exercise an RT worker interval which executes no softirq action. */
-static void rv_test_irqstate_rt_empty_worker(struct kunit *test)
+static void run_irqstate_rt_empty_worker(struct kunit *test, bool real_worker)
 {
 	struct irqstate_empty_worker_ctx *empty_ctx;
 	struct rv_kunit_ctx *ctx = test->priv;
@@ -605,11 +616,9 @@ static void rv_test_irqstate_rt_empty_worker(struct kunit *test)
 	}
 
 	prepare_test(test, &rv_irqstate_ops.mon);
-	guard(migrate)();
 	empty_ctx = kunit_kzalloc(test, sizeof(*empty_ctx), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, empty_ctx);
-	empty_ctx->owner = current;
-	empty_ctx->owner_cpu = smp_processor_id();
+	empty_ctx->real_worker = real_worker;
 
 	ret = register_trace_softirq_context_entry(irqstate_empty_worker_entry,
 						   empty_ctx);
@@ -641,9 +650,25 @@ static void rv_test_irqstate_rt_empty_worker(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, softirq_count(), 0U);
 	saved_count = preempt_count();
 	saved_softirq = softirq_count();
-	WRITE_ONCE(empty_ctx->armed, true);
-	softirq_kunit_run_empty_worker();
-	WRITE_ONCE(empty_ctx->armed, false);
+	if (real_worker) {
+		cpus_read_lock();
+		ret = softirq_kunit_run_empty_ksoftirqd(&empty_ctx->owner,
+							&empty_ctx->owner_cpu,
+							&empty_ctx->armed);
+		cpus_read_unlock();
+	} else {
+		migrate_disable();
+		WRITE_ONCE(empty_ctx->owner_cpu, smp_processor_id());
+		WRITE_ONCE(empty_ctx->owner, current);
+		/* Publish the owner before globally registered callbacks match it. */
+		smp_store_release(&empty_ctx->armed, true);
+		softirq_kunit_run_empty_worker();
+		WRITE_ONCE(empty_ctx->armed, false);
+		migrate_enable();
+		ret = 0;
+	}
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_ASSERT_NOT_NULL(test, empty_ctx->owner);
 
 	order_ok = empty_ctx->event_index == 2 && !empty_ctx->inside_pair &&
 		   !empty_ctx->bad_order;
@@ -661,12 +686,32 @@ static void rv_test_irqstate_rt_empty_worker(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, softirq_count(), saved_softirq);
 	KUNIT_EXPECT_FALSE(test, irqs_disabled());
 	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
-	kunit_info(test,
-		   "RT empty worker events=%u/%u actions=%u/%u order=%u serving=%u same_cpu=%u restored=%u\n",
-		   empty_ctx->entries, empty_ctx->exits,
-		   empty_ctx->action_entries, empty_ctx->action_exits, order_ok,
-		   !empty_ctx->bad_boundary_context,
-		   !empty_ctx->bad_boundary_cpu, restored);
+	if (real_worker)
+		kunit_info(test,
+			   "RT smpboot empty worker events=%u/%u actions=%u/%u order=%u serving=%u same_cpu=%u restored=%u\n",
+			   empty_ctx->entries, empty_ctx->exits,
+			   empty_ctx->action_entries, empty_ctx->action_exits,
+			   order_ok, !empty_ctx->bad_boundary_context,
+			   !empty_ctx->bad_boundary_cpu, restored);
+	else
+		kunit_info(test,
+			   "RT empty worker events=%u/%u actions=%u/%u order=%u serving=%u same_cpu=%u restored=%u\n",
+			   empty_ctx->entries, empty_ctx->exits,
+			   empty_ctx->action_entries, empty_ctx->action_exits,
+			   order_ok, !empty_ctx->bad_boundary_context,
+			   !empty_ctx->bad_boundary_cpu, restored);
+}
+
+/* Exercise an RT worker interval which executes no softirq action. */
+static void rv_test_irqstate_rt_empty_worker(struct kunit *test)
+{
+	run_irqstate_rt_empty_worker(test, false);
+}
+
+/* Exercise the real ksoftirqd task and its smpboot predicate. */
+static void rv_test_irqstate_rt_smpboot_empty_worker(struct kunit *test)
+{
+	run_irqstate_rt_empty_worker(test, true);
 }
 
 static int irqstate_preempt_worker(void *arg)
@@ -882,6 +927,7 @@ static void rv_test_irqstate_rt_prepare_switch(struct kunit *test)
 #define rv_test_irqstate_sync rv_test_stub
 #define rv_test_irqstate_rt_inline_bh rv_test_stub
 #define rv_test_irqstate_rt_empty_worker rv_test_stub
+#define rv_test_irqstate_rt_smpboot_empty_worker rv_test_stub
 #define rv_test_irqstate_preempt rv_test_stub
 #define rv_test_irqstate_rt_prepare_irq rv_test_stub
 #define rv_test_irqstate_rt_prepare_switch rv_test_stub

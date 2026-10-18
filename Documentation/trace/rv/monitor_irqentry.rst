@@ -235,6 +235,15 @@ deterministically covers the owner's no-handler interval; it does not invoke
 the smpboot predicate or prove that the current task is the real ksoftirqd
 thread.
 
+``rv_test_irqstate_rt_smpboot_empty_worker`` complements that unit seam. A
+KUnit-only flag makes the real ``ksoftirqd_should_run()`` predicate return true
+once when no work is pending. The smpboot loop then invokes
+``run_ksoftirqd()`` in the real per-CPU ksoftirqd task. The test requires the
+same empty boundary pair and accepts samples only while that forced invocation
+is active. This exercises the real predicate-to-worker path and pending-zero
+decision; it does not claim to reproduce the naturally raced pending-bit
+interleaving.
+
 With built-in RV KUnit tests, ``rv_test_irqexit_live`` enters the real
 ``preempt_schedule_irq()`` helper with and without a task switch on one CPU.
 ``rv_test_irqexit_migrate`` instead wakes a same-CPU FIFO worker which moves
