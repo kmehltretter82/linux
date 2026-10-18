@@ -217,6 +217,14 @@ once. The softirq cases snapshot reactions before the invalid control, so
 an error on the valid sequence cannot replace the expected later error.
 These are adapter synchronization tests, not concurrent tracefs writes.
 
+``rv_test_irqstate_rt_inline_bh`` forces a pending tasklet through the
+PREEMPT_RT ``local_bh_enable()`` inline-processing path. It requires the
+tasklet to finish synchronously in the enabling task, on the same CPU, while
+serving-softirq state is set and local interrupts are enabled. Independent
+boundary probes require exactly one entry before the callback and one exit
+afterward, both with local interrupts disabled and live serving state set;
+the monitor must accept the pair and the original counts must be restored.
+
 With built-in RV KUnit tests, ``rv_test_irqexit_live`` enters the real
 ``preempt_schedule_irq()`` helper with and without a task switch on one CPU.
 ``rv_test_irqexit_migrate`` instead wakes a same-CPU FIFO worker which moves

@@ -340,6 +340,154 @@ struct irqstate_preempt_ctx {
 	bool worker_in_softirq;
 };
 
+struct irqstate_inline_bh_ctx {
+	struct tasklet_struct tasklet;
+	struct task_struct *owner;
+	int owner_cpu;
+	unsigned int entries;
+	unsigned int exits;
+	unsigned int tasklet_runs;
+	bool armed;
+	bool bad_boundary_context;
+	bool bad_boundary_cpu;
+	bool tasklet_serving;
+	bool tasklet_same_task;
+	bool tasklet_same_cpu;
+	bool tasklet_irqs_enabled;
+	bool tasklet_bracketed;
+	bool entry_attached;
+	bool exit_attached;
+};
+
+static void irqstate_inline_bh_entry(void *data, bool serving)
+{
+	struct irqstate_inline_bh_ctx *inline_ctx = data;
+
+	if (!READ_ONCE(inline_ctx->armed) || current != inline_ctx->owner)
+		return;
+	inline_ctx->entries++;
+	if (!serving || !in_serving_softirq() || !irqs_disabled())
+		inline_ctx->bad_boundary_context = true;
+	if (raw_smp_processor_id() != inline_ctx->owner_cpu)
+		inline_ctx->bad_boundary_cpu = true;
+}
+
+static void irqstate_inline_bh_exit(void *data, bool serving)
+{
+	struct irqstate_inline_bh_ctx *inline_ctx = data;
+
+	if (!READ_ONCE(inline_ctx->armed) || current != inline_ctx->owner)
+		return;
+	inline_ctx->exits++;
+	if (!serving || !in_serving_softirq() || !irqs_disabled())
+		inline_ctx->bad_boundary_context = true;
+	if (raw_smp_processor_id() != inline_ctx->owner_cpu)
+		inline_ctx->bad_boundary_cpu = true;
+}
+
+static void irqstate_inline_bh_tasklet(struct tasklet_struct *tasklet)
+{
+	struct irqstate_inline_bh_ctx *inline_ctx;
+
+	inline_ctx = from_tasklet(inline_ctx, tasklet, tasklet);
+	inline_ctx->tasklet_runs++;
+	inline_ctx->tasklet_serving = !!in_serving_softirq();
+	inline_ctx->tasklet_same_task = current == inline_ctx->owner;
+	inline_ctx->tasklet_same_cpu = raw_smp_processor_id() ==
+					inline_ctx->owner_cpu;
+	inline_ctx->tasklet_irqs_enabled = !irqs_disabled();
+	inline_ctx->tasklet_bracketed = inline_ctx->entries == 1 &&
+					 inline_ctx->exits == 0;
+}
+
+static void irqstate_inline_bh_kill(void *data)
+{
+	struct irqstate_inline_bh_ctx *inline_ctx = data;
+
+	tasklet_kill(&inline_ctx->tasklet);
+}
+
+static void irqstate_inline_bh_detach(void *data)
+{
+	struct irqstate_inline_bh_ctx *inline_ctx = data;
+
+	if (inline_ctx->entry_attached)
+		unregister_trace_softirq_context_entry(irqstate_inline_bh_entry, inline_ctx);
+	if (inline_ctx->exit_attached)
+		unregister_trace_softirq_context_exit(irqstate_inline_bh_exit, inline_ctx);
+	tracepoint_synchronize_unregister();
+}
+
+/* Force the RT BH-disabled to inline-serving transition. */
+static void rv_test_irqstate_rt_inline_bh(struct kunit *test)
+{
+	struct irqstate_inline_bh_ctx *inline_ctx;
+	struct rv_kunit_ctx *ctx = test->priv;
+	unsigned int saved_count, saved_softirq;
+	int ret;
+
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT)) {
+		kunit_skip(test, "Requires RT inline softirq processing");
+		return;
+	}
+
+	prepare_test(test, &rv_irqstate_ops.mon);
+	inline_ctx = kunit_kzalloc(test, sizeof(*inline_ctx), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, inline_ctx);
+	inline_ctx->owner = current;
+	tasklet_setup(&inline_ctx->tasklet, irqstate_inline_bh_tasklet);
+	KUNIT_ASSERT_EQ(test, 0,
+			kunit_add_action_or_reset(test, irqstate_inline_bh_kill,
+						  inline_ctx));
+
+	ret = register_trace_softirq_context_entry(irqstate_inline_bh_entry, inline_ctx);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	inline_ctx->entry_attached = true;
+	KUNIT_ASSERT_EQ(test, 0,
+			kunit_add_action_or_reset(test, irqstate_inline_bh_detach,
+						  inline_ctx));
+	ret = register_trace_softirq_context_exit(irqstate_inline_bh_exit, inline_ctx);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	inline_ctx->exit_attached = true;
+	attach_irqstate_test_probes();
+	KUNIT_ASSERT_EQ(test, 0,
+			kunit_add_action_or_reset(test, detach_irqstate_test_probes,
+						  NULL));
+
+	KUNIT_ASSERT_TRUE(test, preemptible());
+	KUNIT_ASSERT_EQ(test, softirq_count(), 0U);
+	saved_count = preempt_count();
+	saved_softirq = softirq_count();
+	local_bh_disable();
+	inline_ctx->owner_cpu = raw_smp_processor_id();
+	WRITE_ONCE(inline_ctx->armed, true);
+	tasklet_schedule(&inline_ctx->tasklet);
+	local_bh_enable();
+	WRITE_ONCE(inline_ctx->armed, false);
+	kunit_release_action(test, irqstate_inline_bh_kill, inline_ctx);
+
+	KUNIT_EXPECT_EQ(test, inline_ctx->tasklet_runs, 1U);
+	KUNIT_EXPECT_TRUE(test, inline_ctx->tasklet_serving);
+	KUNIT_EXPECT_TRUE(test, inline_ctx->tasklet_same_task);
+	KUNIT_EXPECT_TRUE(test, inline_ctx->tasklet_same_cpu);
+	KUNIT_EXPECT_TRUE(test, inline_ctx->tasklet_irqs_enabled);
+	KUNIT_EXPECT_TRUE(test, inline_ctx->tasklet_bracketed);
+	KUNIT_EXPECT_EQ(test, inline_ctx->entries, 1U);
+	KUNIT_EXPECT_EQ(test, inline_ctx->exits, 1U);
+	KUNIT_EXPECT_FALSE(test, inline_ctx->bad_boundary_context);
+	KUNIT_EXPECT_FALSE(test, inline_ctx->bad_boundary_cpu);
+	KUNIT_EXPECT_EQ(test, preempt_count(), saved_count);
+	KUNIT_EXPECT_EQ(test, softirq_count(), saved_softirq);
+	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
+	kunit_info(test,
+		   "RT inline BH tasklet=%u same_task=%u same_cpu=%u serving=%u events=%u/%u restored=%u\n",
+		   inline_ctx->tasklet_runs, inline_ctx->tasklet_same_task,
+		   inline_ctx->tasklet_same_cpu, inline_ctx->tasklet_serving,
+		   inline_ctx->entries, inline_ctx->exits,
+		   preempt_count() == saved_count &&
+		   softirq_count() == saved_softirq);
+}
+
 static int irqstate_preempt_worker(void *arg)
 {
 	struct irqstate_preempt_ctx *preempt_ctx = arg;
@@ -551,6 +699,7 @@ static void rv_test_irqstate_rt_prepare_switch(struct kunit *test)
 #define rv_test_irqstate rv_test_stub
 #define rv_test_irqstate_depth rv_test_stub
 #define rv_test_irqstate_sync rv_test_stub
+#define rv_test_irqstate_rt_inline_bh rv_test_stub
 #define rv_test_irqstate_preempt rv_test_stub
 #define rv_test_irqstate_rt_prepare_irq rv_test_stub
 #define rv_test_irqstate_rt_prepare_switch rv_test_stub
