@@ -916,13 +916,8 @@ asmlinkage __visible void __softirq_entry __do_softirq(void)
 	handle_softirqs(false);
 }
 
-/**
- * irq_enter_rcu - Enter an interrupt context with RCU watching
- */
-void irq_enter_rcu(void)
+static __always_inline void irq_enter_rcu_common(void)
 {
-	__irq_enter_raw();
-
 	/*
 	 * If this is a nested interrupt that hits the exit_to_user_mode_loop
 	 * where it has enabled interrupts but before it has hit schedule() we
@@ -936,6 +931,28 @@ void irq_enter_rcu(void)
 
 	account_hardirq_enter(current);
 	trace_hardirq_context_entry(hardirq_count() >> HARDIRQ_SHIFT);
+}
+
+/**
+ * irq_enter_rcu_preempt_counted - Enter hardirq with its count already set
+ *
+ * Complete an early raw hardirq preempt-count update, then establish the
+ * remaining lockdep, timer and accounting state.
+ */
+void irq_enter_rcu_preempt_counted(void)
+{
+	preempt_count_add_finish(HARDIRQ_OFFSET);
+	lockdep_hardirq_enter();
+	irq_enter_rcu_common();
+}
+
+/**
+ * irq_enter_rcu - Enter an interrupt context with RCU watching
+ */
+void irq_enter_rcu(void)
+{
+	__irq_enter_raw();
+	irq_enter_rcu_common();
 }
 
 /**
