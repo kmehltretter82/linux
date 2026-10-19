@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
 #include <linux/futex.h>
+#include <linux/hardirq.h>
 #include <linux/highmem.h>
 #include <linux/irq-entry-common.h>
 #include <linux/jump_label.h>
@@ -118,6 +119,35 @@ noinstr irqentry_state_t irqentry_enter(struct pt_regs *regs)
 	}
 
 	return irqentry_enter_from_kernel_mode(regs);
+}
+
+/**
+ * irqentry_hardirq_enter - Establish state for ordinary hardirq entry
+ * @regs: Pointer to the interrupted register state
+ *
+ * Install the raw hardirq count before anything instrumentable can run. Then
+ * establish IRQ-disabled and hardirq lockdep state before context tracking or
+ * irqflag tracing can invoke callbacks. The caller must have distinguished an
+ * ordinary hardirq from NMI-like entry and must complete the delayed
+ * preempt-count bookkeeping with irq_enter_rcu_preempt_counted().
+ *
+ * Returns: An opaque object for the matching irqentry exit operation.
+ */
+noinstr irqentry_state_t irqentry_hardirq_enter(struct pt_regs *regs)
+{
+	__preempt_count_add(HARDIRQ_OFFSET);
+
+	if (user_mode(regs)) {
+		irqentry_state_t ret = {
+			.exit_rcu = false,
+		};
+
+		__enter_from_user_mode(regs, true);
+		rseq_note_user_irq_entry();
+		return ret;
+	}
+
+	return __irqentry_enter_from_kernel_mode(regs, true);
 }
 
 /**

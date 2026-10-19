@@ -25,15 +25,6 @@ static __always_inline void rcu_irq_enter_check_tick(void)
 		__rcu_irq_enter_check_tick();
 }
 
-/*
- * Establish hardirq context before any instrumentable entry code can run.
- * The caller must pair this with irq_enter_rcu_preempt_counted().
- */
-static __always_inline void irqentry_hardirq_preempt_count_add(void)
-{
-	__preempt_count_add(HARDIRQ_OFFSET);
-}
-
 void irq_enter_rcu_preempt_counted(void);
 
 /*
