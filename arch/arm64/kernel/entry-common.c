@@ -524,9 +524,10 @@ static __always_inline void __el1_irq(struct pt_regs *regs,
 {
 	irqentry_state_t state;
 
+	irqentry_hardirq_preempt_count_add();
 	state = arm64_enter_from_kernel_mode(regs);
 
-	irq_enter_rcu();
+	irq_enter_rcu_preempt_counted();
 	do_interrupt_handler(regs, handler);
 	irq_exit_rcu();
 
@@ -839,6 +840,7 @@ asmlinkage void noinstr el0t_64_sync_handler(struct pt_regs *regs)
 static void noinstr el0_interrupt(struct pt_regs *regs,
 				  void (*handler)(struct pt_regs *))
 {
+	irqentry_hardirq_preempt_count_add();
 	arm64_enter_from_user_mode(regs);
 
 	write_sysreg(DAIF_PROCCTX_NOIRQ, daif);
@@ -846,7 +848,7 @@ static void noinstr el0_interrupt(struct pt_regs *regs,
 	if (regs->pc & BIT(55))
 		arm64_apply_bp_hardening();
 
-	irq_enter_rcu();
+	irq_enter_rcu_preempt_counted();
 	do_interrupt_handler(regs, handler);
 	irq_exit_rcu();
 
