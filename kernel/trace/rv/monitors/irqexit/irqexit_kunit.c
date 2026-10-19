@@ -220,7 +220,7 @@ static int irqexit_live_fixture_init(struct kunit *test)
 
 static void irqexit_live_fixture_exit(struct kunit *test)
 {
-	const struct irqexit_live_ctx *live = test->params_array.params;
+	struct irqexit_live_ctx *live = (void *)test->params_array.params;
 	struct rv_monitor *mon = rv_irqexit_ops.mon.rv_this;
 
 	mon->enabled = 0;
