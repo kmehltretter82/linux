@@ -467,7 +467,8 @@ static void rv_test_irqstate_depth_overflow(struct kunit *test)
 	unsigned int max_depth = HARDIRQ_MASK >> HARDIRQ_SHIFT;
 	unsigned int observed_depth, saved_count, saved_nmi;
 	unsigned int nmi_at_max, nmi_at_overflow;
-	int reactions_before, reactions_at_overflow, reactions_after_unwind;
+	int reactions_before, reactions_before_overflow;
+	int reactions_at_overflow, reactions_after_unwind;
 	unsigned long flags;
 
 	prepare_test(test, &rv_irqstate_ops.mon);
@@ -483,6 +484,7 @@ static void rv_test_irqstate_depth_overflow(struct kunit *test)
 	}
 	observed_depth = hardirq_count() >> HARDIRQ_SHIFT;
 	nmi_at_max = nmi_count();
+	reactions_before_overflow = ctx->reactions;
 
 	/*
 	 * A real increment here would carry into NMI_MASK. Feed the resulting
@@ -499,7 +501,9 @@ static void rv_test_irqstate_depth_overflow(struct kunit *test)
 	local_irq_restore(flags);
 
 	KUNIT_EXPECT_EQ(test, observed_depth, max_depth);
-	KUNIT_EXPECT_EQ(test, reactions_at_overflow, reactions_before + 1);
+	KUNIT_EXPECT_EQ(test, reactions_before_overflow, reactions_before);
+	KUNIT_EXPECT_EQ(test, reactions_at_overflow,
+			reactions_before_overflow + 1);
 	KUNIT_EXPECT_EQ(test, reactions_after_unwind, reactions_at_overflow);
 	RV_KUNIT_EXPECT_REACTION(test, ctx);
 	KUNIT_EXPECT_EQ(test, nmi_at_max, saved_nmi);
