@@ -202,6 +202,16 @@ entry/exit events used by ``sts``.
 KUnit scheduling coverage
 -------------------------
 
+``rv_test_irqstate_shared_actions`` emits two distinct IRQ action pairs for
+one IRQ number inside a single real ``irq_enter_rcu()``/``irq_exit_rcu()``
+boundary. Independent probes, filtered by the exact action pointers, require
+the first action to return ``IRQ_NONE`` and the second ``IRQ_HANDLED`` in the
+same order used by generic shared-IRQ dispatch. They also check hardirq and
+interrupt state, task and CPU identity, event counts, and count restoration.
+The monitor must accept the surrounding context without treating either
+action as another hardirq boundary. The test emits the action tracepoints
+directly; it does not construct an IRQ descriptor or invoke action handlers.
+
 ``rv_test_irqstate_depth`` constructs every representable hardirq nesting
 level with the raw accounting helpers, then unwinds the complete stack. It
 checks the actual deepest component and restoration of the original count.

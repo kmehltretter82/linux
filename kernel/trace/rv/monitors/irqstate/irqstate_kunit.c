@@ -137,6 +137,109 @@ static void detach_irqstate_test_probes(void *unused)
 	tracepoint_synchronize_unregister();
 }
 
+struct irqstate_shared_actions_ctx {
+	struct irqaction actions[2];
+	struct task_struct *owner;
+	int owner_cpu;
+	int irq;
+	int results[2];
+	unsigned int entries;
+	unsigned int exits;
+	unsigned int entry_mask;
+	unsigned int exit_mask;
+	unsigned int event_index;
+	bool armed;
+	bool bad_order;
+	bool bad_context;
+	bool bad_owner;
+	bool bad_cpu;
+	bool bad_irq;
+	bool bad_result;
+	bool entry_attached;
+	bool exit_attached;
+};
+
+static int irqstate_shared_action_index(struct irqstate_shared_actions_ctx *shared_ctx,
+					struct irqaction *action)
+{
+	if (action == &shared_ctx->actions[0])
+		return 0;
+	if (action == &shared_ctx->actions[1])
+		return 1;
+
+	return -1;
+}
+
+static void irqstate_shared_action_entry(void *data, int irq,
+					 struct irqaction *action)
+{
+	struct irqstate_shared_actions_ctx *shared_ctx = data;
+	int index;
+
+	/* Filter globally registered callbacks by exact action identity first. */
+	index = irqstate_shared_action_index(shared_ctx, action);
+	if (index < 0 || !READ_ONCE(shared_ctx->armed))
+		return;
+
+	shared_ctx->entries++;
+	shared_ctx->entry_mask |= BIT(index);
+	if (shared_ctx->event_index != index * 2)
+		shared_ctx->bad_order = true;
+	shared_ctx->event_index++;
+	if (!in_hardirq() || hardirq_count() != HARDIRQ_OFFSET ||
+	    !irqs_disabled())
+		shared_ctx->bad_context = true;
+	if (current != shared_ctx->owner)
+		shared_ctx->bad_owner = true;
+	if (raw_smp_processor_id() != shared_ctx->owner_cpu)
+		shared_ctx->bad_cpu = true;
+	if (irq != shared_ctx->irq)
+		shared_ctx->bad_irq = true;
+}
+
+static void irqstate_shared_action_exit(void *data, int irq,
+					struct irqaction *action, int ret)
+{
+	struct irqstate_shared_actions_ctx *shared_ctx = data;
+	int index;
+
+	/* Filter globally registered callbacks by exact action identity first. */
+	index = irqstate_shared_action_index(shared_ctx, action);
+	if (index < 0 || !READ_ONCE(shared_ctx->armed))
+		return;
+
+	shared_ctx->exits++;
+	shared_ctx->exit_mask |= BIT(index);
+	if (shared_ctx->event_index != index * 2 + 1)
+		shared_ctx->bad_order = true;
+	shared_ctx->event_index++;
+	if (!in_hardirq() || hardirq_count() != HARDIRQ_OFFSET ||
+	    !irqs_disabled())
+		shared_ctx->bad_context = true;
+	if (current != shared_ctx->owner)
+		shared_ctx->bad_owner = true;
+	if (raw_smp_processor_id() != shared_ctx->owner_cpu)
+		shared_ctx->bad_cpu = true;
+	if (irq != shared_ctx->irq)
+		shared_ctx->bad_irq = true;
+	if (ret != shared_ctx->results[index])
+		shared_ctx->bad_result = true;
+}
+
+static void irqstate_shared_actions_detach(void *data)
+{
+	struct irqstate_shared_actions_ctx *shared_ctx = data;
+
+	WRITE_ONCE(shared_ctx->armed, false);
+	if (shared_ctx->exit_attached)
+		unregister_trace_irq_handler_exit(irqstate_shared_action_exit,
+						  shared_ctx);
+	if (shared_ctx->entry_attached)
+		unregister_trace_irq_handler_entry(irqstate_shared_action_entry,
+						   shared_ctx);
+	tracepoint_synchronize_unregister();
+}
+
 static void rv_test_irqstate(struct kunit *test)
 {
 	struct rv_kunit_ctx *ctx = test->priv;
@@ -248,6 +351,81 @@ static void rv_test_irqstate(struct kunit *test)
 	KUNIT_ASSERT_TRUE(test,
 			  exercise_irqstate_softirq(IRQSTATE_SOFTIRQ_TRACEPOINT_ONLY));
 	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
+}
+
+static void rv_test_irqstate_shared_actions(struct kunit *test)
+{
+	struct irqstate_shared_actions_ctx *shared_ctx;
+	struct rv_kunit_ctx *ctx = test->priv;
+	unsigned int saved_count, saved_softirq;
+	unsigned long flags;
+	int ret;
+
+	prepare_test(test, &rv_irqstate_ops.mon);
+	guard(migrate)();
+	shared_ctx = kunit_kzalloc(test, sizeof(*shared_ctx), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, shared_ctx);
+	shared_ctx->actions[0].name = "rv-kunit-none";
+	shared_ctx->actions[1].name = "rv-kunit-handled";
+	shared_ctx->results[0] = IRQ_NONE;
+	shared_ctx->results[1] = IRQ_HANDLED;
+	shared_ctx->irq = 42;
+	shared_ctx->owner = current;
+	shared_ctx->owner_cpu = raw_smp_processor_id();
+
+	ret = register_trace_irq_handler_entry(irqstate_shared_action_entry,
+					       shared_ctx);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	shared_ctx->entry_attached = true;
+	KUNIT_ASSERT_EQ(test, 0,
+			kunit_add_action_or_reset(test,
+						  irqstate_shared_actions_detach,
+						  shared_ctx));
+	ret = register_trace_irq_handler_exit(irqstate_shared_action_exit,
+					      shared_ctx);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	shared_ctx->exit_attached = true;
+	attach_irqstate_test_probes();
+	KUNIT_ASSERT_EQ(test, 0,
+			kunit_add_action_or_reset(test, detach_irqstate_test_probes,
+						  NULL));
+
+	saved_count = preempt_count();
+	saved_softirq = softirq_count();
+	WRITE_ONCE(shared_ctx->armed, true);
+	local_irq_save(flags);
+	irq_enter_rcu();
+	trace_irq_handler_entry(shared_ctx->irq, &shared_ctx->actions[0]);
+	trace_irq_handler_exit(shared_ctx->irq, &shared_ctx->actions[0],
+			       shared_ctx->results[0]);
+	trace_irq_handler_entry(shared_ctx->irq, &shared_ctx->actions[1]);
+	trace_irq_handler_exit(shared_ctx->irq, &shared_ctx->actions[1],
+			       shared_ctx->results[1]);
+	irq_exit_rcu();
+	WRITE_ONCE(shared_ctx->armed, false);
+	local_irq_restore(flags);
+
+	KUNIT_EXPECT_EQ(test, shared_ctx->entries, 2U);
+	KUNIT_EXPECT_EQ(test, shared_ctx->exits, 2U);
+	KUNIT_EXPECT_EQ(test, shared_ctx->entry_mask, 3U);
+	KUNIT_EXPECT_EQ(test, shared_ctx->exit_mask, 3U);
+	KUNIT_EXPECT_EQ(test, shared_ctx->event_index, 4U);
+	KUNIT_EXPECT_FALSE(test, shared_ctx->bad_order);
+	KUNIT_EXPECT_FALSE(test, shared_ctx->bad_context);
+	KUNIT_EXPECT_FALSE(test, shared_ctx->bad_owner);
+	KUNIT_EXPECT_FALSE(test, shared_ctx->bad_cpu);
+	KUNIT_EXPECT_FALSE(test, shared_ctx->bad_irq);
+	KUNIT_EXPECT_FALSE(test, shared_ctx->bad_result);
+	KUNIT_EXPECT_EQ(test, preempt_count(), saved_count);
+	KUNIT_EXPECT_EQ(test, softirq_count(), saved_softirq);
+	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
+	kunit_info(test,
+		   "shared actions events=%u/%u order=%u context=%u same_task=%u same_cpu=%u restored=%u\n",
+		   shared_ctx->entries, shared_ctx->exits,
+		   !shared_ctx->bad_order, !shared_ctx->bad_context,
+		   !shared_ctx->bad_owner, !shared_ctx->bad_cpu,
+		   preempt_count() == saved_count &&
+		   softirq_count() == saved_softirq);
 }
 
 static void rv_test_irqstate_depth(struct kunit *test)
@@ -975,6 +1153,7 @@ static void rv_test_irqstate_rt_prepare_switch(struct kunit *test)
 
 #else
 #define rv_test_irqstate rv_test_stub
+#define rv_test_irqstate_shared_actions rv_test_stub
 #define rv_test_irqstate_depth rv_test_stub
 #define rv_test_irqstate_depth_overflow rv_test_stub
 #define rv_test_irqstate_sync rv_test_stub
