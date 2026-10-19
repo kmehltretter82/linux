@@ -89,7 +89,8 @@ static void run_irqstate_softirq(struct tasklet_struct *tasklet)
 	case IRQSTATE_SOFTIRQ_TRACEPOINT_ONLY:
 	case IRQSTATE_SOFTIRQ_SYNC:
 	case IRQSTATE_SOFTIRQ_SYNC_INTERRUPTED:
-		unreachable();
+		WARN_ON_ONCE(1);
+		break;
 	}
 
 	rv_irqstate_ops.handle_softirq_exit(NULL, true);
