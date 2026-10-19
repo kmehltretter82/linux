@@ -937,12 +937,12 @@ static __always_inline void irq_enter_rcu_common(void)
  * irq_enter_rcu_preempt_counted - Enter hardirq with its count already set
  *
  * Complete an early raw hardirq preempt-count update, then establish the
- * remaining lockdep, timer and accounting state.
+ * remaining timer and accounting state. The matching lockdep hardirq state
+ * was established by irqentry_hardirq_enter() before entry tracing.
  */
 void irq_enter_rcu_preempt_counted(void)
 {
 	preempt_count_add_finish(HARDIRQ_OFFSET);
-	lockdep_hardirq_enter();
 	irq_enter_rcu_common();
 }
 
