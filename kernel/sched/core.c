@@ -5978,7 +5978,7 @@ static inline void sched_tick_stop(int cpu) { }
  * If the value passed in is equal to the current preempt count
  * then we just disabled preemption. Start timing the latency.
  */
-static inline void preempt_latency_start(int val)
+static __always_inline void preempt_latency_start(int val)
 {
 	if (preempt_count() == val) {
 		unsigned long ip = get_lock_parent_ip();
@@ -5987,6 +5987,14 @@ static inline void preempt_latency_start(int val)
 #endif
 		trace_preempt_off(CALLER_ADDR0, ip);
 	}
+}
+
+static __always_inline void preempt_count_add_debug_checks(void)
+{
+#ifdef CONFIG_DEBUG_PREEMPT
+	DEBUG_LOCKS_WARN_ON((preempt_count() & PREEMPT_MASK) >=
+				PREEMPT_MASK - 10);
+#endif
 }
 
 /**
@@ -5998,10 +6006,7 @@ static inline void preempt_latency_start(int val)
  */
 void preempt_count_add_finish(int val)
 {
-#ifdef CONFIG_DEBUG_PREEMPT
-	DEBUG_LOCKS_WARN_ON((preempt_count() & PREEMPT_MASK) >=
-				PREEMPT_MASK - 10);
-#endif
+	preempt_count_add_debug_checks();
 	preempt_latency_start(val);
 }
 NOKPROBE_SYMBOL(preempt_count_add_finish);
@@ -6021,7 +6026,9 @@ void preempt_count_add(int val)
 		return;
 #endif
 	__preempt_count_add(val);
-	preempt_count_add_finish(val);
+	preempt_count_add_debug_checks();
+	/* Keep latency attribution in the preempt_count_add() stack frame. */
+	preempt_latency_start(val);
 }
 EXPORT_SYMBOL(preempt_count_add);
 NOKPROBE_SYMBOL(preempt_count_add);
