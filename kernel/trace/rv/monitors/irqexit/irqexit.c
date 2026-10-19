@@ -25,7 +25,7 @@ static u64 ha_get_env(struct ha_monitor *ha_mon, enum envs_irqexit env, u64 time
 	case hardirq_irqexit:
 		return hardirq_count();
 	case irq_off_irqexit:
-		return irqs_disabled();
+		return !!irqs_disabled();
 	case owner_current_irqexit:
 		return ha_get_target(ha_mon) == rv_get_current();
 	default:
