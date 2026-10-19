@@ -722,7 +722,8 @@ static void rv_test_irqstate_irq_exit_inline(struct kunit *test)
 			kunit_add_action_or_reset(test, detach_irqstate_test_probes,
 						  NULL));
 
-	KUNIT_ASSERT_TRUE(test, preemptible());
+	KUNIT_ASSERT_FALSE(test, in_interrupt());
+	KUNIT_ASSERT_FALSE(test, irqs_disabled());
 	KUNIT_ASSERT_EQ(test, softirq_count(), 0U);
 	guard(migrate)();
 	inline_ctx->owner = current;
