@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/kernel.h>
+#include <linux/irqflags.h>
 #include <linux/rv.h>
 #include <rv/kunit.h>
 #include <trace/events/sched.h>
@@ -16,6 +17,11 @@ static void rv_test_opid(struct kunit *test)
 	/* Ensure we keep the same per-cpu monitor */
 	guard(migrate)();
 	KUNIT_EXPECT_TRUE(test, preemptible());
+
+	/* Need resched with interrupts disabled */
+	scoped_guard(irq)
+		rv_opid_ops.handle_sched_need_resched(NULL, NULL, 0, TIF_NEED_RESCHED);
+	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
 
 	/* Wakeup with preemption and interrupts enabled */
 	RV_KUNIT_EXPECT_REACTION_HERE(test, ctx)
