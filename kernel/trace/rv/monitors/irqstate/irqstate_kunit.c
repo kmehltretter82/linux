@@ -283,6 +283,58 @@ static void rv_test_irqstate_depth(struct kunit *test)
 		   max_depth, observed_depth, preempt_count() == saved_count);
 }
 
+static void rv_test_irqstate_depth_overflow(struct kunit *test)
+{
+	struct rv_kunit_ctx *ctx = test->priv;
+	unsigned int max_depth = HARDIRQ_MASK >> HARDIRQ_SHIFT;
+	unsigned int observed_depth, saved_count, saved_nmi;
+	unsigned int nmi_at_max, nmi_at_overflow;
+	int reactions_before, reactions_at_overflow, reactions_after_unwind;
+	unsigned long flags;
+
+	prepare_test(test, &rv_irqstate_ops.mon);
+	guard(migrate)();
+	saved_count = preempt_count();
+	saved_nmi = nmi_count();
+	reactions_before = ctx->reactions;
+
+	local_irq_save(flags);
+	for (unsigned int depth = 1; depth <= max_depth; depth++) {
+		__irq_enter_raw();
+		rv_irqstate_ops.handle_hardirq_entry(NULL, depth);
+	}
+	observed_depth = hardirq_count() >> HARDIRQ_SHIFT;
+	nmi_at_max = nmi_count();
+
+	/*
+	 * A real increment here would carry into NMI_MASK. Feed the resulting
+	 * wrapped depth directly to the adapter without corrupting preempt_count.
+	 */
+	rv_irqstate_ops.handle_hardirq_entry(NULL, 0);
+	nmi_at_overflow = nmi_count();
+	reactions_at_overflow = ctx->reactions;
+	for (unsigned int depth = max_depth; depth; depth--) {
+		rv_irqstate_ops.handle_hardirq_exit(NULL, depth);
+		__irq_exit_raw();
+	}
+	reactions_after_unwind = ctx->reactions;
+	local_irq_restore(flags);
+
+	KUNIT_EXPECT_EQ(test, observed_depth, max_depth);
+	KUNIT_EXPECT_EQ(test, reactions_at_overflow, reactions_before + 1);
+	KUNIT_EXPECT_EQ(test, reactions_after_unwind, reactions_at_overflow);
+	RV_KUNIT_EXPECT_REACTION(test, ctx);
+	KUNIT_EXPECT_EQ(test, nmi_at_max, saved_nmi);
+	KUNIT_EXPECT_EQ(test, nmi_at_overflow, saved_nmi);
+	KUNIT_EXPECT_EQ(test, nmi_count(), saved_nmi);
+	KUNIT_EXPECT_EQ(test, preempt_count(), saved_count);
+	kunit_info(test,
+		   "hardirq overflow max_depth=%u observed=%u reactions=%d restored=%u\n",
+		   max_depth, observed_depth,
+		   reactions_after_unwind - reactions_before,
+		   preempt_count() == saved_count && nmi_count() == saved_nmi);
+}
+
 static void rv_test_irqstate_sync(struct kunit *test)
 {
 	struct rv_kunit_ctx *ctx = test->priv;
@@ -924,6 +976,7 @@ static void rv_test_irqstate_rt_prepare_switch(struct kunit *test)
 #else
 #define rv_test_irqstate rv_test_stub
 #define rv_test_irqstate_depth rv_test_stub
+#define rv_test_irqstate_depth_overflow rv_test_stub
 #define rv_test_irqstate_sync rv_test_stub
 #define rv_test_irqstate_rt_inline_bh rv_test_stub
 #define rv_test_irqstate_rt_empty_worker rv_test_stub

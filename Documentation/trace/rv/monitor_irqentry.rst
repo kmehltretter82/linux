@@ -209,6 +209,15 @@ An unmatched exit after the valid cycle must fail, so ignoring every event
 cannot satisfy the test. This is maximum valid nesting, not live counter
 overflow or physical interrupt-stack recursion.
 
+``rv_test_irqstate_depth_overflow`` fills the hardirq component to its maximum
+and then supplies the adapter with the depth value that another increment
+would wrap to. It requires exactly one reaction, no additional reaction while
+the valid stack is unwound, an unchanged NMI component, and exact restoration
+of the original preempt count. The test deliberately does not execute the
+overflowing raw increment, because that would carry into the adjacent NMI
+component. It tests rejection of wrapped boundary metadata, not live counter
+overflow.
+
 ``rv_test_irqstate_sync`` resets and enables the bare adapter inside single
 and nested hardirq contexts, inside a real serving-softirq callback, and
 inside a hardirq interrupting that callback. Valid unwinding must establish
