@@ -9,7 +9,9 @@
 #include <linux/kthread.h>
 #include <linux/rv.h>
 #include <linux/sched.h>
+#include <linux/wait.h>
 #include <rv/kunit.h>
+#include <rv_trace.h>
 #include <trace/events/irq.h>
 
 #include "irqstate_kunit.h"
@@ -137,6 +139,191 @@ static void detach_irqstate_test_probes(void *unused)
 	rv_irqstate_ops.detach();
 	tracepoint_synchronize_unregister();
 }
+
+#ifndef MODULE
+struct irqstate_live_toggle_ctx {
+	struct task_struct *worker;
+	wait_queue_head_t progress;
+	atomic_t pairs;
+	atomic_t model_entries;
+	atomic_t model_exits;
+	unsigned int target_cpu;
+	bool monitor_initialized;
+	bool observer_attached;
+	bool cpus_locked;
+};
+
+static int irqstate_live_toggle_worker(void *data)
+{
+	struct irqstate_live_toggle_ctx *live = data;
+	unsigned long flags;
+
+	while (!kthread_should_stop()) {
+		local_irq_save(flags);
+		irq_enter_rcu();
+		irq_exit_rcu();
+		local_irq_restore(flags);
+		atomic_inc(&live->pairs);
+		wake_up(&live->progress);
+		cond_resched();
+	}
+
+	return 0;
+}
+
+static void irqstate_live_toggle_observe(void *data, char *state,
+					 char *event, char *next_state,
+					 bool final_state)
+{
+	struct irqstate_live_toggle_ctx *live = data;
+
+	if (raw_smp_processor_id() != live->target_cpu)
+		return;
+	if (!strcmp(event, "hardirq_entry"))
+		atomic_inc(&live->model_entries);
+	else if (!strcmp(event, "hardirq_exit"))
+		atomic_inc(&live->model_exits);
+}
+
+static bool irqstate_live_wait_for(struct irqstate_live_toggle_ctx *live,
+				   atomic_t *counter, int target)
+{
+	return wait_event_timeout(live->progress,
+				  atomic_read(counter) >= target, 5 * HZ) != 0;
+}
+
+static void irqstate_live_toggle_cleanup(void *data)
+{
+	struct irqstate_live_toggle_ctx *live = data;
+	struct rv_monitor *mon = rv_irqstate_ops.mon.rv_this;
+
+	if (live->worker) {
+		kthread_stop(live->worker);
+		live->worker = NULL;
+	}
+	mon->enabled = 0;
+	if (live->monitor_initialized) {
+		mon->disable();
+		live->monitor_initialized = false;
+	}
+	if (live->observer_attached) {
+		unregister_trace_event_irqstate(irqstate_live_toggle_observe, live);
+		live->observer_attached = false;
+	}
+	tracepoint_synchronize_unregister();
+	if (live->cpus_locked) {
+		cpus_read_unlock();
+		live->cpus_locked = false;
+	}
+
+	RV_KUNIT_EXPECT_NO_REACTION(kunit_get_current_test(), active_ctx);
+	mon->react = mon->reactor ? mon->reactor->react : NULL;
+	active_ctx = NULL;
+	rv_mock_current(NULL);
+}
+
+static void rv_test_irqstate_live_toggle(struct kunit *test)
+{
+	struct rv_monitor *mon = rv_irqstate_ops.mon.rv_this;
+	struct rv_kunit_ctx *ctx = test->priv;
+	struct irqstate_live_toggle_ctx *live;
+	struct task_struct *worker;
+	int disabled_entries, disabled_exits, pairs;
+	bool progressed;
+	int ret;
+
+	KUNIT_ASSERT_FALSE(test, mon->enabled);
+	live = kunit_kzalloc(test, sizeof(*live), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, live);
+	init_waitqueue_head(&live->progress);
+	active_ctx = ctx;
+	mon->react = rv_kunit_mock_react;
+	rv_mock_current(NULL);
+	KUNIT_ASSERT_EQ(test, 0,
+			kunit_add_action_or_reset(test,
+						  irqstate_live_toggle_cleanup,
+						  live));
+
+	if (num_online_cpus() < 2) {
+		kunit_skip(test, "Requires two online CPUs");
+		return;
+	}
+	cpus_read_lock();
+	live->cpus_locked = true;
+	guard(migrate)();
+	live->target_cpu = cpumask_any_but(cpu_online_mask,
+					   raw_smp_processor_id());
+	KUNIT_ASSERT_LT(test, live->target_cpu, nr_cpu_ids);
+
+	ret = register_trace_event_irqstate(irqstate_live_toggle_observe, live);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	live->observer_attached = true;
+	ret = mon->enable();
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	live->monitor_initialized = true;
+	mon->enabled = 1;
+
+	worker = kthread_create(irqstate_live_toggle_worker, live,
+				"rv-irqstate-toggle");
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, worker);
+	live->worker = worker;
+	kthread_bind(worker, live->target_cpu);
+	wake_up_process(worker);
+	progressed = irqstate_live_wait_for(live, &live->model_entries, 8);
+	KUNIT_ASSERT_TRUE(test, progressed);
+	progressed = irqstate_live_wait_for(live, &live->model_exits, 8);
+	KUNIT_ASSERT_TRUE(test, progressed);
+
+	for (int cycle = 0; cycle < 8; cycle++) {
+		mon->enabled = 0;
+		mon->disable();
+		live->monitor_initialized = false;
+		tracepoint_synchronize_unregister();
+
+		disabled_entries = atomic_read(&live->model_entries);
+		disabled_exits = atomic_read(&live->model_exits);
+		pairs = atomic_read(&live->pairs);
+		progressed = irqstate_live_wait_for(live, &live->pairs, pairs + 8);
+		KUNIT_ASSERT_TRUE(test, progressed);
+		KUNIT_EXPECT_EQ(test, atomic_read(&live->model_entries),
+				disabled_entries);
+		KUNIT_EXPECT_EQ(test, atomic_read(&live->model_exits),
+				disabled_exits);
+
+		ret = mon->enable();
+		KUNIT_ASSERT_EQ(test, ret, 0);
+		live->monitor_initialized = true;
+		mon->enabled = 1;
+		progressed = irqstate_live_wait_for(live, &live->model_entries,
+						    disabled_entries + 8);
+		KUNIT_ASSERT_TRUE(test, progressed);
+		progressed = irqstate_live_wait_for(live, &live->model_exits,
+						    disabled_exits + 8);
+		KUNIT_ASSERT_TRUE(test, progressed);
+	}
+
+	mon->enabled = 0;
+	mon->disable();
+	live->monitor_initialized = false;
+	tracepoint_synchronize_unregister();
+	kthread_stop(live->worker);
+	live->worker = NULL;
+
+	KUNIT_EXPECT_GT(test, atomic_read(&live->pairs), 0);
+	KUNIT_EXPECT_GT(test, atomic_read(&live->model_entries), 0);
+	KUNIT_EXPECT_GT(test, atomic_read(&live->model_exits), 0);
+	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
+	kunit_info(test, "live toggle cycles=8 pairs=%d model=%d/%d cpu=%u\n",
+		   atomic_read(&live->pairs),
+		   atomic_read(&live->model_entries),
+		   atomic_read(&live->model_exits), live->target_cpu);
+}
+#else
+static void rv_test_irqstate_live_toggle(struct kunit *test)
+{
+	kunit_skip(test, "Requires built-in RV tests");
+}
+#endif
 
 struct irqstate_shared_actions_ctx {
 	struct irqaction actions[2];
