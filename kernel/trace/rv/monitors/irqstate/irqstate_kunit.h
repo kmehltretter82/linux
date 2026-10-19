@@ -17,6 +17,8 @@ extern const struct rv_irqstate_ops {
 	void (*handle_hardirq_exit)(void *data, unsigned int depth);
 	void (*handle_softirq_entry)(void *data, bool serving);
 	void (*handle_softirq_exit)(void *data, bool serving);
+	void (*set_lifecycle_hook)(void (*hook)(void *data, bool enabling),
+				   void *data);
 } rv_irqstate_ops;
 #endif
 

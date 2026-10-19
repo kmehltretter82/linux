@@ -20,6 +20,36 @@
 #include "irqstate.h"
 #include <rv/ha_monitor.h>
 
+#if IS_ENABLED(CONFIG_RV_MONITORS_KUNIT_TEST)
+static void (*irqstate_lifecycle_hook)(void *data, bool enabling);
+static void *irqstate_lifecycle_hook_data;
+
+/*
+ * Let KUnit force an IRQ pair while the boundary probes are deliberately
+ * only half attached or detached. The disabled monitor must reject that
+ * otherwise inconsistent instrumentation window.
+ */
+static void irqstate_test_lifecycle_point(bool enabling)
+{
+	void (*hook)(void *data, bool enabling);
+
+	hook = READ_ONCE(irqstate_lifecycle_hook);
+	if (hook)
+		hook(READ_ONCE(irqstate_lifecycle_hook_data), enabling);
+}
+
+static void irqstate_set_lifecycle_hook(void (*hook)(void *data, bool enabling),
+					void *data)
+{
+	WRITE_ONCE(irqstate_lifecycle_hook_data, data);
+	WRITE_ONCE(irqstate_lifecycle_hook, hook);
+}
+#else
+static inline void irqstate_test_lifecycle_point(bool enabling)
+{
+}
+#endif
+
 static u64 ha_get_env(struct ha_monitor *ha_mon, enum envs_irqstate env,
 		      u64 time_ns)
 {
@@ -141,6 +171,7 @@ static void handle_sched_switch(void *data, bool preempt,
 static void attach_irqstate(void)
 {
 	rv_attach_trace_probe("irqstate", hardirq_context_entry, handle_hardirq_entry);
+	irqstate_test_lifecycle_point(true);
 	rv_attach_trace_probe("irqstate", hardirq_context_exit, handle_hardirq_exit);
 	rv_attach_trace_probe("irqstate", softirq_context_entry, handle_softirq_entry);
 	rv_attach_trace_probe("irqstate", softirq_context_exit, handle_softirq_exit);
@@ -159,6 +190,7 @@ static void attach_irqstate(void)
 static void detach_irqstate(void)
 {
 	rv_detach_trace_probe("irqstate", hardirq_context_entry, handle_hardirq_entry);
+	irqstate_test_lifecycle_point(false);
 	rv_detach_trace_probe("irqstate", hardirq_context_exit, handle_hardirq_exit);
 	rv_detach_trace_probe("irqstate", softirq_context_entry, handle_softirq_entry);
 	rv_detach_trace_probe("irqstate", softirq_context_exit, handle_softirq_exit);
@@ -227,6 +259,7 @@ const struct rv_irqstate_ops rv_irqstate_ops = {
 	.handle_hardirq_exit = handle_hardirq_exit,
 	.handle_softirq_entry = handle_softirq_entry,
 	.handle_softirq_exit = handle_softirq_exit,
+	.set_lifecycle_hook = irqstate_set_lifecycle_hook,
 };
 EXPORT_SYMBOL_IF_KUNIT(rv_irqstate_ops);
 #endif

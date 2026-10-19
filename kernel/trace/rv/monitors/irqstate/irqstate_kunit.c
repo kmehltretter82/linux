@@ -141,34 +141,126 @@ static void detach_irqstate_test_probes(void *unused)
 }
 
 #ifndef MODULE
+#define IRQSTATE_LIVE_CYCLES	8
+#define IRQSTATE_LIVE_BATCH	8
+
 struct irqstate_live_toggle_ctx {
 	struct task_struct *worker;
+	const char *skip_reason;
 	wait_queue_head_t progress;
+	atomic_t requests;
+	atomic_t completed;
 	atomic_t pairs;
 	atomic_t model_entries;
 	atomic_t model_exits;
+	atomic_t enable_overlaps;
+	atomic_t disable_overlaps;
+	atomic_t hook_timeouts;
+	unsigned int source_cpu;
 	unsigned int target_cpu;
 	bool monitor_initialized;
 	bool observer_attached;
-	bool cpus_locked;
+	bool hook_installed;
+	bool pair_active;
+	bool hotplug_disabled;
 };
+
+/* Parent fixtures run in the suite runner, which owns rv_interface_lock. */
+static int irqstate_live_fixture_init(struct kunit *test)
+{
+	struct rv_monitor *mon = rv_irqstate_ops.mon.rv_this;
+	struct irqstate_live_toggle_ctx *live;
+	unsigned int source_cpu, target_cpu;
+
+	if (mon->enabled)
+		return -EBUSY;
+
+	/* Do all fallible setup before preventing CPU hotplug. */
+	live = kunit_kzalloc(test, sizeof(*live), GFP_KERNEL);
+	if (!live)
+		return -ENOMEM;
+	init_waitqueue_head(&live->progress);
+
+	cpu_hotplug_disable();
+	live->hotplug_disabled = true;
+	source_cpu = cpumask_first_and(current->cpus_ptr, cpu_online_mask);
+	target_cpu = cpumask_next_and(source_cpu, current->cpus_ptr,
+				      cpu_online_mask);
+	if (target_cpu >= nr_cpu_ids) {
+		live->skip_reason = "Requires two allowed online CPUs";
+	} else {
+		live->source_cpu = source_cpu;
+		live->target_cpu = target_cpu;
+	}
+
+	kunit_register_params_array(test, live, 1, NULL);
+	return 0;
+}
+
+static void irqstate_live_fixture_exit(struct kunit *test)
+{
+	struct irqstate_live_toggle_ctx *live = (void *)test->params_array.params;
+
+	if (live->hotplug_disabled) {
+		cpu_hotplug_enable();
+		live->hotplug_disabled = false;
+	}
+	/* Retain the child's explicit skip reason on the parent case. */
+	if (live->skip_reason)
+		kunit_mark_skipped(test, "%s", live->skip_reason);
+}
 
 static int irqstate_live_toggle_worker(void *data)
 {
 	struct irqstate_live_toggle_ctx *live = data;
 	unsigned long flags;
 
-	while (!kthread_should_stop()) {
+	for (;;) {
+		wait_event(live->progress,
+			   kthread_should_stop() ||
+			   atomic_read_acquire(&live->completed) <
+			   atomic_read_acquire(&live->requests));
+		if (kthread_should_stop())
+			break;
+
 		local_irq_save(flags);
+		WRITE_ONCE(live->pair_active, true);
 		irq_enter_rcu();
 		irq_exit_rcu();
+		WRITE_ONCE(live->pair_active, false);
 		local_irq_restore(flags);
 		atomic_inc(&live->pairs);
-		wake_up(&live->progress);
-		cond_resched();
+		atomic_inc_return_release(&live->completed);
+		wake_up_all(&live->progress);
 	}
 
 	return 0;
+}
+
+static bool irqstate_live_request_pairs(struct irqstate_live_toggle_ctx *live,
+					unsigned int nr)
+{
+	int target;
+
+	target = atomic_add_return(nr, &live->requests);
+	wake_up_all(&live->progress);
+	return wait_event_timeout(live->progress,
+				  atomic_read_acquire(&live->completed) >= target,
+				  5 * HZ) != 0;
+}
+
+static void irqstate_live_lifecycle_hook(void *data, bool enabling)
+{
+	struct irqstate_live_toggle_ctx *live = data;
+
+	if (!irqstate_live_request_pairs(live, 1)) {
+		atomic_inc(&live->hook_timeouts);
+		return;
+	}
+	if (enabling)
+		atomic_inc(&live->enable_overlaps);
+	else
+		atomic_inc(&live->disable_overlaps);
 }
 
 static void irqstate_live_toggle_observe(void *data, char *state,
@@ -177,19 +269,23 @@ static void irqstate_live_toggle_observe(void *data, char *state,
 {
 	struct irqstate_live_toggle_ctx *live = data;
 
-	if (raw_smp_processor_id() != live->target_cpu)
+	if (raw_smp_processor_id() != live->target_cpu ||
+	    current != READ_ONCE(live->worker) ||
+	    !READ_ONCE(live->pair_active))
 		return;
-	if (!strcmp(event, "hardirq_entry"))
+	/*
+	 * Count only the outer synthetic pair. irq_exit_rcu() can run pending
+	 * softirqs and temporarily enable interrupts; an intervening real IRQ
+	 * belongs to the in_softirq path, not this test's requested pair.
+	 */
+	if (!strcmp(state, "idle") &&
+	    !strcmp(event, "hardirq_entry") &&
+	    !strcmp(next_state, "in_hardirq"))
 		atomic_inc(&live->model_entries);
-	else if (!strcmp(event, "hardirq_exit"))
+	else if (!strcmp(state, "in_hardirq") &&
+		 !strcmp(event, "hardirq_exit") &&
+		 !strcmp(next_state, "idle"))
 		atomic_inc(&live->model_exits);
-}
-
-static bool irqstate_live_wait_for(struct irqstate_live_toggle_ctx *live,
-				   atomic_t *counter, int target)
-{
-	return wait_event_timeout(live->progress,
-				  atomic_read(counter) >= target, 5 * HZ) != 0;
 }
 
 static void irqstate_live_toggle_cleanup(void *data)
@@ -201,6 +297,10 @@ static void irqstate_live_toggle_cleanup(void *data)
 		kthread_stop(live->worker);
 		live->worker = NULL;
 	}
+	if (live->hook_installed) {
+		rv_irqstate_ops.set_lifecycle_hook(NULL, NULL);
+		live->hook_installed = false;
+	}
 	mon->enabled = 0;
 	if (live->monitor_initialized) {
 		mon->disable();
@@ -211,10 +311,6 @@ static void irqstate_live_toggle_cleanup(void *data)
 		live->observer_attached = false;
 	}
 	tracepoint_synchronize_unregister();
-	if (live->cpus_locked) {
-		cpus_read_unlock();
-		live->cpus_locked = false;
-	}
 
 	RV_KUNIT_EXPECT_NO_REACTION(kunit_get_current_test(), active_ctx);
 	mon->react = mon->reactor ? mon->reactor->react : NULL;
@@ -226,16 +322,14 @@ static void rv_test_irqstate_live_toggle(struct kunit *test)
 {
 	struct rv_monitor *mon = rv_irqstate_ops.mon.rv_this;
 	struct rv_kunit_ctx *ctx = test->priv;
-	struct irqstate_live_toggle_ctx *live;
+	struct irqstate_live_toggle_ctx *live = (void *)test->param_value;
 	struct task_struct *worker;
-	int disabled_entries, disabled_exits, pairs;
+	int disabled_entries, disabled_exits, cycle;
 	bool progressed;
 	int ret;
 
 	KUNIT_ASSERT_FALSE(test, mon->enabled);
-	live = kunit_kzalloc(test, sizeof(*live), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, live);
-	init_waitqueue_head(&live->progress);
 	active_ctx = ctx;
 	mon->react = rv_kunit_mock_react;
 	rv_mock_current(NULL);
@@ -244,24 +338,17 @@ static void rv_test_irqstate_live_toggle(struct kunit *test)
 						  irqstate_live_toggle_cleanup,
 						  live));
 
-	if (num_online_cpus() < 2) {
-		kunit_skip(test, "Requires two online CPUs");
+	if (live->skip_reason) {
+		kunit_skip(test, "%s", live->skip_reason);
 		return;
 	}
-	cpus_read_lock();
-	live->cpus_locked = true;
-	guard(migrate)();
-	live->target_cpu = cpumask_any_but(cpu_online_mask,
-					   raw_smp_processor_id());
-	KUNIT_ASSERT_LT(test, live->target_cpu, nr_cpu_ids);
+	KUNIT_ASSERT_EQ(test,
+			set_cpus_allowed_ptr(current,
+					     cpumask_of(live->source_cpu)), 0);
 
 	ret = register_trace_event_irqstate(irqstate_live_toggle_observe, live);
 	KUNIT_ASSERT_EQ(test, ret, 0);
 	live->observer_attached = true;
-	ret = mon->enable();
-	KUNIT_ASSERT_EQ(test, ret, 0);
-	live->monitor_initialized = true;
-	mon->enabled = 1;
 
 	worker = kthread_create(irqstate_live_toggle_worker, live,
 				"rv-irqstate-toggle");
@@ -269,54 +356,81 @@ static void rv_test_irqstate_live_toggle(struct kunit *test)
 	live->worker = worker;
 	kthread_bind(worker, live->target_cpu);
 	wake_up_process(worker);
-	progressed = irqstate_live_wait_for(live, &live->model_entries, 8);
+	rv_irqstate_ops.set_lifecycle_hook(irqstate_live_lifecycle_hook, live);
+	live->hook_installed = true;
+	progressed = irqstate_live_request_pairs(live, IRQSTATE_LIVE_BATCH);
 	KUNIT_ASSERT_TRUE(test, progressed);
-	progressed = irqstate_live_wait_for(live, &live->model_exits, 8);
-	KUNIT_ASSERT_TRUE(test, progressed);
+	KUNIT_EXPECT_EQ(test, atomic_read(&live->model_entries), 0);
+	KUNIT_EXPECT_EQ(test, atomic_read(&live->model_exits), 0);
 
-	for (int cycle = 0; cycle < 8; cycle++) {
-		mon->enabled = 0;
-		mon->disable();
-		live->monitor_initialized = false;
-		tracepoint_synchronize_unregister();
-
+	for (cycle = 0; cycle < IRQSTATE_LIVE_CYCLES; cycle++) {
 		disabled_entries = atomic_read(&live->model_entries);
 		disabled_exits = atomic_read(&live->model_exits);
-		pairs = atomic_read(&live->pairs);
-		progressed = irqstate_live_wait_for(live, &live->pairs, pairs + 8);
-		KUNIT_ASSERT_TRUE(test, progressed);
+		ret = mon->enable();
+		if (!ret) {
+			live->monitor_initialized = true;
+			mon->enabled = 1;
+		}
+		KUNIT_ASSERT_EQ(test, ret, 0);
+		KUNIT_ASSERT_EQ(test, atomic_read(&live->hook_timeouts), 0);
 		KUNIT_EXPECT_EQ(test, atomic_read(&live->model_entries),
 				disabled_entries);
 		KUNIT_EXPECT_EQ(test, atomic_read(&live->model_exits),
 				disabled_exits);
 
-		ret = mon->enable();
-		KUNIT_ASSERT_EQ(test, ret, 0);
-		live->monitor_initialized = true;
-		mon->enabled = 1;
-		progressed = irqstate_live_wait_for(live, &live->model_entries,
-						    disabled_entries + 8);
+		progressed = irqstate_live_request_pairs(live,
+							 IRQSTATE_LIVE_BATCH);
 		KUNIT_ASSERT_TRUE(test, progressed);
-		progressed = irqstate_live_wait_for(live, &live->model_exits,
-						    disabled_exits + 8);
+		KUNIT_EXPECT_EQ(test, atomic_read(&live->model_entries),
+				disabled_entries + IRQSTATE_LIVE_BATCH);
+		KUNIT_EXPECT_EQ(test, atomic_read(&live->model_exits),
+				disabled_exits + IRQSTATE_LIVE_BATCH);
+
+		disabled_entries = atomic_read(&live->model_entries);
+		disabled_exits = atomic_read(&live->model_exits);
+		mon->enabled = 0;
+		mon->disable();
+		live->monitor_initialized = false;
+		tracepoint_synchronize_unregister();
+		KUNIT_ASSERT_EQ(test, atomic_read(&live->hook_timeouts), 0);
+		KUNIT_EXPECT_EQ(test, atomic_read(&live->model_entries),
+				disabled_entries);
+		KUNIT_EXPECT_EQ(test, atomic_read(&live->model_exits),
+				disabled_exits);
+		progressed = irqstate_live_request_pairs(live,
+							 IRQSTATE_LIVE_BATCH);
 		KUNIT_ASSERT_TRUE(test, progressed);
+		KUNIT_EXPECT_EQ(test, atomic_read(&live->model_entries),
+				disabled_entries);
+		KUNIT_EXPECT_EQ(test, atomic_read(&live->model_exits),
+				disabled_exits);
 	}
 
-	mon->enabled = 0;
-	mon->disable();
-	live->monitor_initialized = false;
-	tracepoint_synchronize_unregister();
 	kthread_stop(live->worker);
 	live->worker = NULL;
 
-	KUNIT_EXPECT_GT(test, atomic_read(&live->pairs), 0);
+	KUNIT_EXPECT_EQ(test, atomic_read(&live->pairs),
+			IRQSTATE_LIVE_BATCH + IRQSTATE_LIVE_CYCLES *
+			(2 + 2 * IRQSTATE_LIVE_BATCH));
+	KUNIT_EXPECT_EQ(test, atomic_read(&live->requests),
+			atomic_read(&live->completed));
 	KUNIT_EXPECT_GT(test, atomic_read(&live->model_entries), 0);
 	KUNIT_EXPECT_GT(test, atomic_read(&live->model_exits), 0);
+	KUNIT_EXPECT_EQ(test, atomic_read(&live->enable_overlaps),
+			IRQSTATE_LIVE_CYCLES);
+	KUNIT_EXPECT_EQ(test, atomic_read(&live->disable_overlaps),
+			IRQSTATE_LIVE_CYCLES);
+	KUNIT_EXPECT_EQ(test, atomic_read(&live->hook_timeouts), 0);
 	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
-	kunit_info(test, "live toggle cycles=8 pairs=%d model=%d/%d cpu=%u\n",
+	kunit_info(test, "live toggle cycles=%d pairs=%d model=%d/%d overlap=%d/%d timeouts=%d cpus=%u/%u\n",
+		   cycle,
 		   atomic_read(&live->pairs),
 		   atomic_read(&live->model_entries),
-		   atomic_read(&live->model_exits), live->target_cpu);
+		   atomic_read(&live->model_exits),
+		   atomic_read(&live->enable_overlaps),
+		   atomic_read(&live->disable_overlaps),
+		   atomic_read(&live->hook_timeouts),
+		   live->source_cpu, live->target_cpu);
 }
 #else
 static void rv_test_irqstate_live_toggle(struct kunit *test)
@@ -1438,6 +1552,7 @@ static void rv_test_irqstate_rt_prepare_switch(struct kunit *test)
 #define rv_test_irqstate_depth rv_test_stub
 #define rv_test_irqstate_depth_overflow rv_test_stub
 #define rv_test_irqstate_sync rv_test_stub
+#define rv_test_irqstate_live_toggle rv_test_stub
 #define rv_test_irqstate_irq_exit_inline rv_test_stub
 #define rv_test_irqstate_rt_inline_bh rv_test_stub
 #define rv_test_irqstate_rt_empty_worker rv_test_stub

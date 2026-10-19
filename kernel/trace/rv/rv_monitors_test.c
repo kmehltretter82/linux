@@ -166,7 +166,14 @@ static struct kunit_case rv_mon_test_cases[] = {
 	KUNIT_CASE(rv_test_irqstate_depth),
 	KUNIT_CASE(rv_test_irqstate_depth_overflow),
 	KUNIT_CASE(rv_test_irqstate_sync),
+#if IS_REACHABLE(CONFIG_RV_MON_IRQSTATE) && !defined(MODULE)
+	KUNIT_CASE_PARAM_WITH_INIT(rv_test_irqstate_live_toggle,
+				   kunit_array_gen_params,
+				   irqstate_live_fixture_init,
+				   irqstate_live_fixture_exit),
+#else
 	KUNIT_CASE(rv_test_irqstate_live_toggle),
+#endif
 	KUNIT_CASE(rv_test_irqstate_irq_exit_inline),
 	KUNIT_CASE(rv_test_irqstate_rt_inline_bh),
 	KUNIT_CASE(rv_test_irqstate_rt_empty_worker),
