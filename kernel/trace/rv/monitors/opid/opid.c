@@ -20,7 +20,7 @@
 static u64 ha_get_env(struct ha_monitor *ha_mon, enum envs_opid env, u64 time_ns)
 {
 	if (env == irq_off_opid)
-		return irqs_disabled();
+		return !!irqs_disabled();
 	else if (env == preempt_off_opid) {
 		if (IS_ENABLED(CONFIG_PREEMPTION))
 			return (preempt_count() & PREEMPT_MASK) > 0;

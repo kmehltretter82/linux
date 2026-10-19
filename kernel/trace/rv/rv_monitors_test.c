@@ -149,6 +149,8 @@ static void rv_test_dummy(struct kunit *test)
 #include "monitors/sco/sco_kunit.c"
 #include "monitors/sssw/sssw_kunit.c"
 #include "monitors/sts/sts_kunit.c"
+#include "monitors/irqstate/irqstate_kunit.c"
+#include "monitors/irqexit/irqexit_kunit.c"
 #include "monitors/opid/opid_kunit.c"
 #include "monitors/nomiss/nomiss_kunit.c"
 #include "monitors/pagefault/pagefault_kunit.c"
@@ -159,6 +161,38 @@ static struct kunit_case rv_mon_test_cases[] = {
 	KUNIT_CASE(rv_test_sco),
 	KUNIT_CASE(rv_test_sssw),
 	KUNIT_CASE(rv_test_sts),
+	KUNIT_CASE(rv_test_irqstate),
+	KUNIT_CASE(rv_test_irqstate_shared_actions),
+	KUNIT_CASE(rv_test_irqstate_depth),
+	KUNIT_CASE(rv_test_irqstate_depth_overflow),
+	KUNIT_CASE(rv_test_irqstate_sync),
+#if IS_REACHABLE(CONFIG_RV_MON_IRQSTATE) && !defined(MODULE)
+	KUNIT_CASE_PARAM_WITH_INIT(rv_test_irqstate_live_toggle,
+				   kunit_array_gen_params,
+				   irqstate_live_fixture_init,
+				   irqstate_live_fixture_exit),
+#else
+	KUNIT_CASE(rv_test_irqstate_live_toggle),
+#endif
+	KUNIT_CASE(rv_test_irqstate_irq_exit_inline),
+	KUNIT_CASE(rv_test_irqstate_rt_inline_bh),
+	KUNIT_CASE(rv_test_irqstate_rt_empty_worker),
+	KUNIT_CASE(rv_test_irqstate_rt_smpboot_empty_worker),
+	KUNIT_CASE(rv_test_irqstate_preempt),
+	KUNIT_CASE(rv_test_irqstate_rt_prepare_irq),
+	KUNIT_CASE(rv_test_irqstate_rt_prepare_switch),
+	KUNIT_CASE(rv_test_irqexit),
+	KUNIT_CASE(rv_test_irqexit_invalid),
+	KUNIT_CASE(rv_test_irqexit_sync),
+#if IS_REACHABLE(CONFIG_RV_MON_IRQEXIT) && !defined(MODULE)
+	KUNIT_CASE_PARAM_WITH_INIT(rv_test_irqexit_live, kunit_array_gen_params,
+				   irqexit_live_fixture_init, irqexit_live_fixture_exit),
+	KUNIT_CASE_PARAM_WITH_INIT(rv_test_irqexit_migrate, kunit_array_gen_params,
+				   irqexit_live_fixture_init, irqexit_live_fixture_exit),
+#else
+	KUNIT_CASE(rv_test_irqexit_live),
+	KUNIT_CASE(rv_test_irqexit_migrate),
+#endif
 	KUNIT_CASE(rv_test_opid),
 	KUNIT_CASE(rv_test_nomiss),
 	KUNIT_CASE(rv_test_pagefault),

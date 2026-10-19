@@ -39,6 +39,67 @@ SOFTIRQ_NAME_LIST
 #define show_softirq_name(val)				\
 	__print_symbolic(val, SOFTIRQ_NAME_LIST)
 
+DECLARE_EVENT_CLASS(hardirq_context,
+		    TP_PROTO(unsigned int depth),
+		    TP_ARGS(depth),
+		    TP_STRUCT__entry(__field(unsigned int, depth)),
+		    TP_fast_assign(__entry->depth = depth;),
+		    TP_printk("depth=%u", __entry->depth));
+
+/**
+ * hardirq_context_entry - generic hardirq state has been established
+ * @depth: hardirq nesting depth, including the context being entered
+ *
+ * This event is emitted after generic hardirq preempt-count, lockdep, timer,
+ * and accounting state has been established. It does not describe the
+ * architecture-specific interval before irq_enter() or irq_enter_rcu().
+ */
+DEFINE_EVENT(hardirq_context, hardirq_context_entry,
+	     TP_PROTO(unsigned int depth),
+	     TP_ARGS(depth));
+
+/**
+ * hardirq_context_exit - generic hardirq state is about to be removed
+ * @depth: hardirq nesting depth, including the context being exited
+ *
+ * This event is emitted with interrupts disabled before generic hardirq
+ * accounting and preempt-count state is removed.
+ */
+DEFINE_EVENT(hardirq_context, hardirq_context_exit,
+	     TP_PROTO(unsigned int depth),
+	     TP_ARGS(depth));
+
+DECLARE_EVENT_CLASS(softirq_context,
+		    TP_PROTO(bool serving),
+		    TP_ARGS(serving),
+		    TP_STRUCT__entry(__field(bool, serving)),
+		    TP_fast_assign(__entry->serving = serving;),
+		    TP_printk("serving=%d", __entry->serving));
+
+/**
+ * softirq_context_entry - serving-softirq state has been established
+ * @serving: whether the current task is serving a softirq
+ *
+ * This event runs with local interrupts disabled after the serving bit is
+ * set. On PREEMPT_RT it includes preparation before handle_softirqs(), even
+ * if the pending-work check finds nothing. It does not mark an individual
+ * action or the start of CPU-time accounting.
+ */
+DEFINE_EVENT(softirq_context, softirq_context_entry,
+	     TP_PROTO(bool serving),
+	     TP_ARGS(serving));
+
+/**
+ * softirq_context_exit - serving-softirq state is about to be removed
+ * @serving: whether the current task is serving a softirq
+ *
+ * This event runs with local interrupts disabled before the serving bit is
+ * cleared. On PREEMPT_RT this includes teardown after handle_softirqs().
+ */
+DEFINE_EVENT(softirq_context, softirq_context_exit,
+	     TP_PROTO(bool serving),
+	     TP_ARGS(serving));
+
 /**
  * irq_handler_entry - called immediately before the irq action handler
  * @irq: irq number

@@ -10,6 +10,8 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #define INSTANTIATE_EXPORTED_INTERRUPT_DISABLE
+#include <kunit/visibility.h>
+#include <linux/completion.h>
 #include <linux/export.h>
 #include <linux/kernel_stat.h>
 #include <linux/interrupt.h>
@@ -178,7 +180,9 @@ bool local_bh_blocked(void)
 
 void __local_bh_disable_ip(unsigned long ip, unsigned int cnt)
 {
+	unsigned long trace_flags = 0;
 	unsigned long flags;
+	bool trace_serving;
 	int newcnt;
 
 	WARN_ON_ONCE(in_hardirq());
@@ -199,6 +203,16 @@ void __local_bh_disable_ip(unsigned long ip, unsigned int cnt)
 			DEBUG_LOCKS_WARN_ON(this_cpu_read(softirq_ctrl.cnt));
 		}
 	}
+
+	/*
+	 * A serving interval starts here, before handle_softirqs(). When its
+	 * entry is traced, keep IRQs and task switches from observing the bit
+	 * before the event. Any blocking BH lock was acquired above.
+	 */
+	trace_serving = (cnt & SOFTIRQ_OFFSET) &&
+			trace_softirq_context_entry_enabled();
+	if (trace_serving)
+		local_irq_save(trace_flags);
 
 	/*
 	 * Track the per CPU softirq disabled state. On RT this is per CPU
@@ -233,14 +247,24 @@ void __local_bh_disable_ip(unsigned long ip, unsigned int cnt)
 			raw_local_irq_restore(flags);
 		}
 	}
+
+	if (trace_serving) {
+		trace_softirq_context_entry(!!in_serving_softirq());
+		local_irq_restore(trace_flags);
+	}
 }
 EXPORT_SYMBOL(__local_bh_disable_ip);
 
 static void __local_bh_enable(unsigned int cnt, bool unlock)
 {
+	bool entering = (cnt & SOFTIRQ_OFFSET) && !in_serving_softirq();
 	unsigned long flags;
 	bool sirq_en = false;
 	int newcnt;
+
+	/* Callers already disabled IRQs around the counter and its events. */
+	if ((cnt & SOFTIRQ_OFFSET) && !entering)
+		trace_softirq_context_exit(!!in_serving_softirq());
 
 	if (IS_ENABLED(CONFIG_PREEMPT_RT_NEEDS_BH_LOCK)) {
 		DEBUG_LOCKS_WARN_ON(current->softirq_disable_cnt !=
@@ -276,6 +300,10 @@ static void __local_bh_enable(unsigned int cnt, bool unlock)
 			WARN_ON_ONCE(current->softirq_disable_cnt < 0);
 		}
 	}
+
+	/* local_bh_enable() can turn BH-disabled state into serving state. */
+	if (entering)
+		trace_softirq_context_entry(!!in_serving_softirq());
 }
 
 void __local_bh_enable_ip(unsigned long ip, unsigned int cnt)
@@ -573,6 +601,187 @@ asmlinkage __visible void do_softirq(void)
 
 #endif /* !CONFIG_PREEMPT_RT */
 
+#if IS_ENABLED(CONFIG_RV_MONITORS_KUNIT_TEST)
+enum softirq_kunit_empty_worker_phase {
+	SOFTIRQ_KUNIT_EMPTY_IDLE,
+	SOFTIRQ_KUNIT_EMPTY_PREPARING,
+	SOFTIRQ_KUNIT_EMPTY_ARMED,
+	SOFTIRQ_KUNIT_EMPTY_RUNNING,
+	SOFTIRQ_KUNIT_EMPTY_DONE,
+};
+
+struct softirq_kunit_empty_worker {
+	atomic_t phase;
+	struct completion done;
+	u32 held_pending;
+};
+
+static DEFINE_PER_CPU(struct softirq_kunit_empty_worker,
+			      softirq_kunit_empty_workers);
+
+/*
+ * Exercise the worker boundaries without entering handle_softirqs().
+ *
+ * The caller must be in preemptible task context with interrupts enabled and
+ * no active softirq context. Like run_ksoftirqd(), this returns with local
+ * interrupts enabled.
+ */
+void softirq_kunit_run_empty_worker(void)
+{
+	ksoftirqd_run_begin();
+	/* Preserve any pending work which raced with the test seam. */
+	wakeup_softirqd();
+	ksoftirqd_run_end();
+}
+EXPORT_SYMBOL_IF_KUNIT(softirq_kunit_run_empty_worker);
+
+bool softirq_kunit_empty_worker_active(void)
+{
+	struct softirq_kunit_empty_worker *worker;
+
+	worker = raw_cpu_ptr(&softirq_kunit_empty_workers);
+	return atomic_read(&worker->phase) == SOFTIRQ_KUNIT_EMPTY_RUNNING &&
+	       current == raw_cpu_read(ksoftirqd);
+}
+EXPORT_SYMBOL_IF_KUNIT(softirq_kunit_empty_worker_active);
+
+/*
+ * Force one real ksoftirqd invocation after its smpboot predicate observes
+ * no pending work. The run itself still uses run_ksoftirqd(). The caller must
+ * hold the CPU hotplug read lock across this call so the selected CPU and its
+ * ksoftirqd remain online. The returned task pointer carries no reference.
+ */
+int softirq_kunit_run_empty_ksoftirqd(struct task_struct **owner,
+				      int *owner_cpu, bool *armed)
+{
+	struct softirq_kunit_empty_worker *worker;
+	struct task_struct *tsk;
+	unsigned long completed;
+	int this_cpu, phase, ret;
+
+	if (!owner || !owner_cpu || !armed)
+		return -EINVAL;
+	WRITE_ONCE(*owner, NULL);
+	WRITE_ONCE(*owner_cpu, -1);
+	WRITE_ONCE(*armed, false);
+
+	lockdep_assert_cpus_held();
+	this_cpu = get_cpu();
+	worker = this_cpu_ptr(&softirq_kunit_empty_workers);
+	if (atomic_cmpxchg(&worker->phase, SOFTIRQ_KUNIT_EMPTY_IDLE,
+			   SOFTIRQ_KUNIT_EMPTY_PREPARING) !=
+	    SOFTIRQ_KUNIT_EMPTY_IDLE) {
+		put_cpu();
+		return -EBUSY;
+	}
+
+	tsk = __this_cpu_read(ksoftirqd);
+	if (!tsk) {
+		atomic_set(&worker->phase, SOFTIRQ_KUNIT_EMPTY_IDLE);
+		put_cpu();
+		return -ENODEV;
+	}
+
+	init_completion(&worker->done);
+	worker->held_pending = 0;
+	WRITE_ONCE(*owner_cpu, this_cpu);
+	WRITE_ONCE(*owner, tsk);
+	/* Publish the owner before globally registered callbacks can match it. */
+	smp_store_release(armed, true);
+	atomic_set(&worker->phase, SOFTIRQ_KUNIT_EMPTY_ARMED);
+	wake_up_process(tsk);
+	put_cpu();
+
+	completed = wait_for_completion_timeout(&worker->done, 5 * HZ);
+	if (!completed) {
+		phase = atomic_cmpxchg(&worker->phase,
+				       SOFTIRQ_KUNIT_EMPTY_ARMED,
+				       SOFTIRQ_KUNIT_EMPTY_IDLE);
+		if (phase == SOFTIRQ_KUNIT_EMPTY_ARMED) {
+			ret = -ETIMEDOUT;
+			goto out_disarm;
+		}
+
+		/*
+		 * Once the predicate has claimed the request, synchronize with
+		 * complete() before making the completion reusable. CPU hotplug
+		 * remains excluded by the caller while this helper runs. RT lock
+		 * contention can delay the worker after it claims the request, so
+		 * wait for it to finish.
+		 */
+		if (phase != SOFTIRQ_KUNIT_EMPTY_RUNNING &&
+		    phase != SOFTIRQ_KUNIT_EMPTY_DONE) {
+			ret = -EIO;
+			goto out_disarm;
+		}
+		wait_for_completion(&worker->done);
+		phase = atomic_cmpxchg(&worker->phase,
+				       SOFTIRQ_KUNIT_EMPTY_DONE,
+				       SOFTIRQ_KUNIT_EMPTY_IDLE);
+		ret = phase == SOFTIRQ_KUNIT_EMPTY_DONE ? -ETIMEDOUT : -EIO;
+		goto out_disarm;
+	}
+
+	phase = atomic_cmpxchg(&worker->phase, SOFTIRQ_KUNIT_EMPTY_DONE,
+			       SOFTIRQ_KUNIT_EMPTY_IDLE);
+	ret = phase == SOFTIRQ_KUNIT_EMPTY_DONE ? 0 : -EIO;
+
+out_disarm:
+	WRITE_ONCE(*armed, false);
+	return ret;
+}
+EXPORT_SYMBOL_IF_KUNIT(softirq_kunit_run_empty_ksoftirqd);
+
+static bool softirq_kunit_force_empty_ksoftirqd(void)
+{
+	struct softirq_kunit_empty_worker *worker;
+
+	worker = this_cpu_ptr(&softirq_kunit_empty_workers);
+	return current == __this_cpu_read(ksoftirqd) &&
+	       atomic_cmpxchg(&worker->phase, SOFTIRQ_KUNIT_EMPTY_ARMED,
+			      SOFTIRQ_KUNIT_EMPTY_RUNNING) ==
+			      SOFTIRQ_KUNIT_EMPTY_ARMED;
+}
+
+static bool softirq_kunit_begin_empty_ksoftirqd(void)
+{
+	struct softirq_kunit_empty_worker *worker;
+
+	worker = this_cpu_ptr(&softirq_kunit_empty_workers);
+	if (atomic_read(&worker->phase) != SOFTIRQ_KUNIT_EMPTY_RUNNING)
+		return false;
+
+	worker->held_pending = local_softirq_pending();
+	set_softirq_pending(0);
+	return true;
+}
+
+static void softirq_kunit_restore_empty_ksoftirqd(bool active)
+{
+	struct softirq_kunit_empty_worker *worker;
+
+	if (!active)
+		return;
+
+	lockdep_assert_irqs_disabled();
+	worker = this_cpu_ptr(&softirq_kunit_empty_workers);
+	or_softirq_pending(worker->held_pending);
+	worker->held_pending = 0;
+}
+
+static void softirq_kunit_finish_empty_ksoftirqd(bool active)
+{
+	struct softirq_kunit_empty_worker *worker;
+
+	if (!active)
+		return;
+
+	worker = this_cpu_ptr(&softirq_kunit_empty_workers);
+	atomic_set(&worker->phase, SOFTIRQ_KUNIT_EMPTY_DONE);
+	complete(&worker->done);
+}
+#endif
+
 /*
  * We restart softirq processing for at most MAX_SOFTIRQ_RESTART times,
  * but break the loop if need_resched() is set or after 2 ms.
@@ -645,6 +854,8 @@ static void handle_softirqs(bool ksirqd)
 	from_irq_exit = softirq_handle_begin();
 	in_hardirq = lockdep_softirq_start();
 	account_softirq_enter(current);
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT))
+		trace_softirq_context_entry(!!in_serving_softirq());
 
 restart:
 	/* Reset the pending bitmask before enabling irqs */
@@ -692,6 +903,8 @@ restart:
 		wakeup_softirqd();
 	}
 
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT))
+		trace_softirq_context_exit(!!in_serving_softirq());
 	account_softirq_exit(current);
 	lockdep_softirq_end(in_hardirq);
 	softirq_handle_end(from_irq_exit);
@@ -717,6 +930,7 @@ static __always_inline void irq_enter_rcu_common(void)
 		tick_irq_enter();
 
 	account_hardirq_enter(current);
+	trace_hardirq_context_entry(hardirq_count() >> HARDIRQ_SHIFT);
 }
 
 /**
@@ -788,6 +1002,7 @@ static inline void __irq_exit_rcu(void)
 #else
 	lockdep_assert_irqs_disabled();
 #endif
+	trace_hardirq_context_exit(hardirq_count() >> HARDIRQ_SHIFT);
 	account_hardirq_exit(current);
 
 	/*
@@ -1136,23 +1351,48 @@ void __init softirq_init(void)
 
 static int ksoftirqd_should_run(unsigned int cpu)
 {
-	return local_softirq_pending();
+	unsigned int pending = local_softirq_pending();
+
+#if IS_ENABLED(CONFIG_RV_MONITORS_KUNIT_TEST)
+	if (!pending && softirq_kunit_force_empty_ksoftirqd())
+		return 1;
+#endif
+	return pending;
 }
 
 static void run_ksoftirqd(unsigned int cpu)
 {
+#if IS_ENABLED(CONFIG_RV_MONITORS_KUNIT_TEST)
+	bool kunit_empty;
+#endif
+
 	ksoftirqd_run_begin();
+#if IS_ENABLED(CONFIG_RV_MONITORS_KUNIT_TEST)
+	kunit_empty = softirq_kunit_begin_empty_ksoftirqd();
+#endif
 	if (local_softirq_pending()) {
 		/*
 		 * We can safely run softirq on inline stack, as we are not deep
 		 * in the task stack here.
 		 */
 		handle_softirqs(true);
+#if IS_ENABLED(CONFIG_RV_MONITORS_KUNIT_TEST)
+		softirq_kunit_restore_empty_ksoftirqd(kunit_empty);
+#endif
 		ksoftirqd_run_end();
+#if IS_ENABLED(CONFIG_RV_MONITORS_KUNIT_TEST)
+		softirq_kunit_finish_empty_ksoftirqd(kunit_empty);
+#endif
 		cond_resched();
-		return;
+	} else {
+#if IS_ENABLED(CONFIG_RV_MONITORS_KUNIT_TEST)
+		softirq_kunit_restore_empty_ksoftirqd(kunit_empty);
+#endif
+		ksoftirqd_run_end();
+#if IS_ENABLED(CONFIG_RV_MONITORS_KUNIT_TEST)
+		softirq_kunit_finish_empty_ksoftirqd(kunit_empty);
+#endif
 	}
-	ksoftirqd_run_end();
 }
 
 #ifdef CONFIG_HOTPLUG_CPU
