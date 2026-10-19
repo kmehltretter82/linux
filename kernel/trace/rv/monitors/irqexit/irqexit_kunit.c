@@ -188,6 +188,7 @@ struct irqexit_live_ctx {
 	bool observer_attached;
 	bool raw_entry_attached;
 	bool raw_exit_attached;
+	bool hotplug_disabled;
 };
 
 /* Parent fixtures run in the suite runner, which owns rv_interface_lock. */
@@ -203,10 +204,13 @@ static int irqexit_live_fixture_init(struct kunit *test)
 	if (!live)
 		return -ENOMEM;
 
-	cpus_read_lock();
+	/* Keep the online mask stable without nesting tracepoint registration. */
+	cpu_hotplug_disable();
+	live->hotplug_disabled = true;
 	ret = mon->enable();
 	if (ret) {
-		cpus_read_unlock();
+		cpu_hotplug_enable();
+		live->hotplug_disabled = false;
 		kunit_kfree(test, live);
 		return ret;
 	}
@@ -221,7 +225,10 @@ static void irqexit_live_fixture_exit(struct kunit *test)
 
 	mon->enabled = 0;
 	mon->disable();
-	cpus_read_unlock();
+	if (live->hotplug_disabled) {
+		cpu_hotplug_enable();
+		live->hotplug_disabled = false;
+	}
 	/* Retain the child's explicit skip reason on the parent case. */
 	if (live->skip_reason)
 		kunit_mark_skipped(test, "%s", live->skip_reason);
