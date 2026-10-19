@@ -236,6 +236,16 @@ once. The softirq cases snapshot reactions before the invalid control, so
 an error on the valid sequence cannot replace the expected later error.
 These are adapter synchronization tests, not concurrent tracefs writes.
 
+``rv_test_irqstate_irq_exit_inline`` schedules a tasklet inside a real generic
+hardirq boundary and requires non-RT ``irq_exit_rcu()`` to process it before
+returning. Independent boundary probes require exactly one softirq entry
+before the tasklet and one exit afterward. The callback must run in the same
+task and on the same CPU with interrupts enabled and serving-softirq state set,
+but outside hardirq context; the monitor must accept both context pairs and
+the original counts must be restored. If the kernel diverts the tasklet to
+ksoftirqd, for example under forced IRQ threading, the test drains it and
+skips because that configuration does not provide the inline path.
+
 ``rv_test_irqstate_rt_inline_bh`` forces a pending tasklet through the
 PREEMPT_RT ``local_bh_enable()`` inline-processing path. It requires the
 tasklet to finish synchronously in the enabling task, on the same CPU, while

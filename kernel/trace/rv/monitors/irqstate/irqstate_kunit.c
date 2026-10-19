@@ -585,6 +585,7 @@ struct irqstate_inline_bh_ctx {
 	bool tasklet_same_task;
 	bool tasklet_same_cpu;
 	bool tasklet_irqs_enabled;
+	bool tasklet_in_hardirq;
 	bool tasklet_bracketed;
 	bool entry_attached;
 	bool exit_attached;
@@ -658,6 +659,7 @@ static void irqstate_inline_bh_tasklet(struct tasklet_struct *tasklet)
 	inline_ctx->tasklet_same_cpu = raw_smp_processor_id() ==
 					inline_ctx->owner_cpu;
 	inline_ctx->tasklet_irqs_enabled = !irqs_disabled();
+	inline_ctx->tasklet_in_hardirq = !!in_hardirq();
 	inline_ctx->tasklet_bracketed = inline_ctx->entries == 1 &&
 					 inline_ctx->exits == 0;
 }
@@ -673,11 +675,97 @@ static void irqstate_inline_bh_detach(void *data)
 {
 	struct irqstate_inline_bh_ctx *inline_ctx = data;
 
+	WRITE_ONCE(inline_ctx->armed, false);
 	if (inline_ctx->entry_attached)
 		unregister_trace_softirq_context_entry(irqstate_inline_bh_entry, inline_ctx);
 	if (inline_ctx->exit_attached)
 		unregister_trace_softirq_context_exit(irqstate_inline_bh_exit, inline_ctx);
 	tracepoint_synchronize_unregister();
+}
+
+/* Exercise non-RT inline softirq processing from a real hardirq exit. */
+static void rv_test_irqstate_irq_exit_inline(struct kunit *test)
+{
+	struct irqstate_inline_bh_ctx *inline_ctx;
+	struct rv_kunit_ctx *ctx = test->priv;
+	unsigned int saved_count, saved_softirq;
+	unsigned long flags;
+	bool ran_inline;
+	int ret;
+
+	if (IS_ENABLED(CONFIG_PREEMPT_RT)) {
+		kunit_skip(test, "Requires non-RT IRQ-exit softirq processing");
+		return;
+	}
+
+	prepare_test(test, &rv_irqstate_ops.mon);
+	inline_ctx = kunit_kzalloc(test, sizeof(*inline_ctx), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, inline_ctx);
+	tasklet_setup(&inline_ctx->tasklet, irqstate_inline_bh_tasklet);
+	KUNIT_ASSERT_EQ(test, 0,
+			kunit_add_action_or_reset(test, irqstate_inline_bh_kill,
+						  inline_ctx));
+
+	ret = register_trace_softirq_context_entry(irqstate_inline_bh_entry,
+						   inline_ctx);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	inline_ctx->entry_attached = true;
+	KUNIT_ASSERT_EQ(test, 0,
+			kunit_add_action_or_reset(test, irqstate_inline_bh_detach,
+						  inline_ctx));
+	ret = register_trace_softirq_context_exit(irqstate_inline_bh_exit,
+						  inline_ctx);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	inline_ctx->exit_attached = true;
+	attach_irqstate_test_probes();
+	KUNIT_ASSERT_EQ(test, 0,
+			kunit_add_action_or_reset(test, detach_irqstate_test_probes,
+						  NULL));
+
+	KUNIT_ASSERT_TRUE(test, preemptible());
+	KUNIT_ASSERT_EQ(test, softirq_count(), 0U);
+	guard(migrate)();
+	inline_ctx->owner = current;
+	inline_ctx->owner_cpu = raw_smp_processor_id();
+	saved_count = preempt_count();
+	saved_softirq = softirq_count();
+	WRITE_ONCE(inline_ctx->armed, true);
+	local_irq_save(flags);
+	irq_enter_rcu();
+	tasklet_schedule(&inline_ctx->tasklet);
+	irq_exit_rcu();
+	ran_inline = inline_ctx->tasklet_runs != 0;
+	WRITE_ONCE(inline_ctx->armed, false);
+	local_irq_restore(flags);
+
+	/* Drain a tasklet diverted to ksoftirqd before inspecting or skipping. */
+	kunit_release_action(test, irqstate_inline_bh_kill, inline_ctx);
+	if (!ran_inline) {
+		kunit_skip(test, "IRQ exit diverted pending softirq to ksoftirqd");
+		return;
+	}
+
+	KUNIT_EXPECT_EQ(test, inline_ctx->tasklet_runs, 1U);
+	KUNIT_EXPECT_TRUE(test, inline_ctx->tasklet_serving);
+	KUNIT_EXPECT_TRUE(test, inline_ctx->tasklet_same_task);
+	KUNIT_EXPECT_TRUE(test, inline_ctx->tasklet_same_cpu);
+	KUNIT_EXPECT_TRUE(test, inline_ctx->tasklet_irqs_enabled);
+	KUNIT_EXPECT_FALSE(test, inline_ctx->tasklet_in_hardirq);
+	KUNIT_EXPECT_TRUE(test, inline_ctx->tasklet_bracketed);
+	KUNIT_EXPECT_EQ(test, inline_ctx->entries, 1U);
+	KUNIT_EXPECT_EQ(test, inline_ctx->exits, 1U);
+	KUNIT_EXPECT_FALSE(test, inline_ctx->bad_boundary_context);
+	KUNIT_EXPECT_FALSE(test, inline_ctx->bad_boundary_cpu);
+	KUNIT_EXPECT_EQ(test, preempt_count(), saved_count);
+	KUNIT_EXPECT_EQ(test, softirq_count(), saved_softirq);
+	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
+	kunit_info(test,
+		   "IRQ-exit inline tasklet=%u same_task=%u same_cpu=%u serving=%u hardirq=%u events=%u/%u restored=%u\n",
+		   inline_ctx->tasklet_runs, inline_ctx->tasklet_same_task,
+		   inline_ctx->tasklet_same_cpu, inline_ctx->tasklet_serving,
+		   inline_ctx->tasklet_in_hardirq, inline_ctx->entries,
+		   inline_ctx->exits, preempt_count() == saved_count &&
+		   softirq_count() == saved_softirq);
 }
 
 /* Force the RT BH-disabled to inline-serving transition. */
@@ -1157,6 +1245,7 @@ static void rv_test_irqstate_rt_prepare_switch(struct kunit *test)
 #define rv_test_irqstate_depth rv_test_stub
 #define rv_test_irqstate_depth_overflow rv_test_stub
 #define rv_test_irqstate_sync rv_test_stub
+#define rv_test_irqstate_irq_exit_inline rv_test_stub
 #define rv_test_irqstate_rt_inline_bh rv_test_stub
 #define rv_test_irqstate_rt_empty_worker rv_test_stub
 #define rv_test_irqstate_rt_smpboot_empty_worker rv_test_stub
