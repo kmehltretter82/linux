@@ -193,20 +193,32 @@ Note that the invocation of the actual interrupt handler is within a
 irq_enter_rcu() and irq_exit_rcu() pair.
 
 irq_enter_rcu() updates the preemption count which makes in_hardirq()
-return true, handles NOHZ tick state and interrupt time accounting. This
-means that up to the point where irq_enter_rcu() is invoked in_hardirq()
-returns false.
+return true, handles NOHZ tick state and interrupt time accounting. On this
+entry path, in_hardirq() therefore returns false until irq_enter_rcu() is
+invoked.
+
+Architectures which need hard interrupt state to be visible to very early
+entry callbacks can use the paired irqentry_hardirq_enter() and
+irq_enter_rcu_preempt_counted() interface instead. The architecture must
+distinguish an ordinary hard interrupt from an NMI-like exception before
+calling irqentry_hardirq_enter(). That function installs HARDIRQ_OFFSET before
+instrumentable code can run and establishes the matching lockdep state before
+context tracking and irqflag tracing. irq_enter_rcu_preempt_counted() later
+completes the traceable preemption-count bookkeeping and performs the same
+NOHZ tick and interrupt time accounting as irq_enter_rcu(). in_hardirq()
+returns true between the paired calls.
 
 irq_exit_rcu() handles interrupt time accounting, handles soft interrupts if
 possible, handles the NOHZ tick state and finally undoes the preemption count
 update.
 
-In theory, the preemption count could be updated in irqentry_enter(). In
-practice, deferring this update to irq_enter_rcu() allows the preemption-count
-code to be traced, while also maintaining symmetry with irq_exit_rcu() and
-irqentry_exit(), which are described in the next paragraph. The only downside
-is that the early entry code up to irq_enter_rcu() must be aware that the
-preemption count has not yet been updated with the HARDIRQ_OFFSET state.
+Deferring the complete update to irq_enter_rcu() allows the preemption-count
+code to be traced while maintaining symmetry with irq_exit_rcu() and
+irqentry_exit(), which are described in the next paragraph. The early-counted
+interface preserves that property by splitting the raw update from its
+traceable completion. Entry code must therefore follow one contract
+consistently: before irq_enter_rcu() in_hardirq() is false, while after
+irqentry_hardirq_enter() it is true and the count must not be added again.
 
 Note that soft interrupt handlers must run in BH context rather than in hard
 interrupt context. irq_exit_rcu() therefore replaces HARDIRQ_OFFSET with
