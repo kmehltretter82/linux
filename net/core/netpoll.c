@@ -340,6 +340,7 @@ static netdev_tx_t __netpoll_send_skb(struct netpoll *np, struct sk_buff *skb)
 	/* It is up to the caller to keep npinfo alive. */
 	struct netpoll_info *npinfo;
 	bool irqs_off;
+	bool defer_on_busy;
 
 	/*
 	 * Leave an IRQ-disabled caller in its existing context. An IRQ-enabled
@@ -349,6 +350,8 @@ static netdev_tx_t __netpoll_send_skb(struct netpoll *np, struct sk_buff *skb)
 	 * marker used by stacked devices.
 	 */
 	irqs_off = irqs_disabled();
+	defer_on_busy = IS_ENABLED(CONFIG_PREEMPT_RT) && !irqs_off &&
+			in_task() && preemptible();
 
 	netpoll_tx_begin(irqs_off);
 
@@ -369,9 +372,17 @@ static netdev_tx_t __netpoll_send_skb(struct netpoll *np, struct sk_buff *skb)
 
 		txq = netdev_core_pick_tx(dev, skb, NULL);
 
-		/* try until next clock tick */
-		for (tries = jiffies_to_usecs(1) / USEC_PER_POLL;
-		     tries > 0; --tries) {
+		/*
+		 * Atomic callers retain the polling retry budget. A schedulable
+		 * RT caller makes one attempt and lets the worker retry instead.
+		 * Sampled before netpoll_tx_begin(), defer_on_busy excludes
+		 * callers serving a softirq or running with preemption blocked.
+		 * A task in a BH-disabled section remains eligible so recursive
+		 * sends through stacked devices inherit the deferral behavior.
+		 */
+		tries = defer_on_busy ? 1 :
+			jiffies_to_usecs(1) / USEC_PER_POLL;
+		for (; tries > 0; --tries) {
 			if (HARD_TX_TRYLOCK(dev, txq)) {
 				if (!netif_xmit_stopped(txq))
 					status = netpoll_start_xmit(skb, dev, txq);
@@ -382,6 +393,9 @@ static netdev_tx_t __netpoll_send_skb(struct netpoll *np, struct sk_buff *skb)
 					break;
 
 			}
+
+			if (defer_on_busy)
+				break;
 
 			/* tickle device maybe there is some cleanup */
 			if (netpoll_poll_allowed())
