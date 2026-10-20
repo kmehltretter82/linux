@@ -264,7 +264,9 @@ ndo_start_xmit:
 	they often have no per-queue state.
 
 	Context: Process with BHs disabled or BH (timer),
-		 will be called with interrupts disabled by netconsole.
+		 also called by netconsole with BH exclusion. Netconsole disables
+		 BHs for IRQ-enabled callers or preserves an already-disabled
+		 hard-interrupt state.
 
 	Return codes:
 

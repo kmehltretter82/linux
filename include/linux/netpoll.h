@@ -52,6 +52,15 @@ struct netpoll_info {
 void netpoll_poll_dev(struct net_device *dev);
 void netpoll_poll_disable(struct net_device *dev);
 void netpoll_poll_enable(struct net_device *dev);
+
+/*
+ * Do not newly force hard interrupts off to poll from an IRQ-enabled RT
+ * thread. The already-IRQ-disabled path retains polling, as does non-RT.
+ */
+static inline bool netpoll_poll_allowed(void)
+{
+	return !IS_ENABLED(CONFIG_PREEMPT_RT) || irqs_disabled();
+}
 #else
 static inline void netpoll_poll_disable(struct net_device *dev) { return; }
 static inline void netpoll_poll_enable(struct net_device *dev) { return; }
@@ -89,10 +98,23 @@ static inline void netpoll_poll_unlock(void *have)
 		smp_store_release(&napi->poll_owner, -1);
 }
 
+/*
+ * True while this context transmits on behalf of netpoll. The marker lives
+ * next to the transmit recursion counter: per CPU, or per task on PREEMPT_RT
+ * where a BH-disabled section can be preempted by another sender on the same
+ * CPU.
+ */
+#ifndef CONFIG_PREEMPT_RT
 static inline bool netpoll_tx_running(struct net_device *dev)
 {
-	return irqs_disabled();
+	return this_cpu_read(softnet_data.xmit.netpoll_tx);
 }
+#else
+static inline bool netpoll_tx_running(struct net_device *dev)
+{
+	return current->net_xmit.netpoll_tx;
+}
+#endif
 
 #else
 static inline void *netpoll_poll_lock(struct napi_struct *napi)

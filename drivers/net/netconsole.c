@@ -2056,7 +2056,8 @@ repeat:
 
 	if (!skb) {
 		if (++count < 10) {
-			netpoll_poll_dev(np->dev);
+			if (netpoll_poll_allowed())
+				netpoll_poll_dev(np->dev);
 			goto repeat;
 		}
 		return NULL;

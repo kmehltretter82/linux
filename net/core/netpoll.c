@@ -61,6 +61,52 @@ unsigned int netpoll_get_carrier_timeout(void)
 }
 EXPORT_SYMBOL_GPL(netpoll_get_carrier_timeout);
 
+/*
+ * Mark a section that transmits on behalf of netpoll. IRQ-enabled callers
+ * also disable BHs for the transmit locking rules. Stacked devices use the
+ * marker to forward the skb through netpoll_send_skb(). The sections nest
+ * because a stacked device can call netpoll_send_skb() again.
+ */
+static struct netdev_xmit *netpoll_xmit_context(void)
+{
+#ifndef CONFIG_PREEMPT_RT
+	return this_cpu_ptr(&softnet_data.xmit);
+#else
+	return &current->net_xmit;
+#endif
+}
+
+static void netpoll_tx_begin(bool irqs_off)
+{
+	if (!irqs_off)
+		local_bh_disable();
+	netpoll_xmit_context()->netpoll_tx++;
+}
+
+static void netpoll_tx_end(bool irqs_off)
+{
+	/*
+	 * local_bh_enable() can run pending softirqs. They no longer belong
+	 * to the netpoll transmit section.
+	 */
+	netpoll_xmit_context()->netpoll_tx--;
+	if (!irqs_off)
+		local_bh_enable();
+}
+
+static void netpoll_restore_irq(struct net_device *dev, bool irqs_off)
+{
+	if (!WARN_ONCE(irqs_off != irqs_disabled(),
+		       "%s(): %s changed the interrupt state (%pS)\n",
+		       __func__, dev->name, dev->netdev_ops->ndo_start_xmit))
+		return;
+
+	if (irqs_off)
+		local_irq_disable();
+	else
+		local_irq_enable();
+}
+
 static netdev_tx_t netpoll_start_xmit(struct sk_buff *skb,
 				      struct net_device *dev,
 				      struct netdev_queue *txq)
@@ -93,7 +139,6 @@ static void queue_process(struct work_struct *work)
 	struct netpoll_info *npinfo =
 		container_of(work, struct netpoll_info, tx_work.work);
 	struct sk_buff *skb;
-	unsigned long flags;
 
 	while ((skb = skb_dequeue(&npinfo->txq))) {
 		struct net_device *dev = skb->dev;
@@ -105,7 +150,7 @@ static void queue_process(struct work_struct *work)
 			continue;
 		}
 
-		local_irq_save(flags);
+		netpoll_tx_begin(false);
 		/* check if skb->queue_mapping is still valid */
 		q_index = skb_get_queue_mapping(skb);
 		if (unlikely(q_index >= dev->real_num_tx_queues)) {
@@ -118,13 +163,15 @@ static void queue_process(struct work_struct *work)
 		    !dev_xmit_complete(netpoll_start_xmit(skb, dev, txq))) {
 			skb_queue_head(&npinfo->txq, skb);
 			HARD_TX_UNLOCK(dev, txq);
-			local_irq_restore(flags);
+			netpoll_restore_irq(dev, false);
+			netpoll_tx_end(false);
 
 			schedule_delayed_work(&npinfo->tx_work, HZ/10);
 			return;
 		}
 		HARD_TX_UNLOCK(dev, txq);
-		local_irq_restore(flags);
+		netpoll_restore_irq(dev, false);
+		netpoll_tx_end(false);
 	}
 }
 
@@ -178,22 +225,33 @@ static void poll_napi(struct net_device *dev)
 
 void netpoll_poll_dev(struct net_device *dev)
 {
-	struct netpoll_info *ni = rcu_dereference_bh(dev->npinfo);
+	struct netpoll_info *ni;
 	const struct net_device_ops *ops;
+	bool poll_allowed;
+	unsigned long flags;
+
+	poll_allowed = netpoll_poll_allowed();
+	lockdep_assert_once(poll_allowed);
+	if (!poll_allowed)
+		return;
+
+	/* rcu_dereference_bh() and the poll callbacks require IRQ exclusion. */
+	local_irq_save(flags);
+	ni = rcu_dereference_bh(dev->npinfo);
 
 	/* Don't do any rx activity if the dev_lock mutex is held
 	 * the dev_open/close paths use this to block netpoll activity
 	 * while changing device state
 	 */
 	if (!ni || down_trylock(&ni->dev_lock))
-		return;
+		goto out_irq;
 
 	/* Some drivers will take the same locks in poll and xmit,
 	 * we can't poll if local CPU is already in xmit.
 	 */
 	if (!netif_running(dev) || netif_local_xmit_active(dev)) {
 		up(&ni->dev_lock);
-		return;
+		goto out_irq;
 	}
 
 	ops = dev->netdev_ops;
@@ -201,10 +259,16 @@ void netpoll_poll_dev(struct net_device *dev)
 		ops->ndo_poll_controller(dev);
 
 	poll_napi(dev);
+	if (WARN_ONCE(!irqs_disabled(),
+		      "%s(): %s enabled interrupts in poll\n",
+		      __func__, dev->name))
+		local_irq_disable();
 
 	up(&ni->dev_lock);
 
 	netpoll_zap_completion_queue();
+out_irq:
+	local_irq_restore(flags);
 }
 EXPORT_SYMBOL(netpoll_poll_dev);
 
@@ -267,7 +331,6 @@ static int netpoll_owner_active(struct net_device *dev)
 	return 0;
 }
 
-/* call with IRQ disabled */
 static netdev_tx_t __netpoll_send_skb(struct netpoll *np, struct sk_buff *skb)
 {
 	netdev_tx_t status = NETDEV_TX_BUSY;
@@ -276,8 +339,18 @@ static netdev_tx_t __netpoll_send_skb(struct netpoll *np, struct sk_buff *skb)
 	unsigned long tries;
 	/* It is up to the caller to keep npinfo alive. */
 	struct netpoll_info *npinfo;
+	bool irqs_off;
 
-	lockdep_assert_irqs_disabled();
+	/*
+	 * Leave an IRQ-disabled caller in its existing context. An IRQ-enabled
+	 * caller uses the regular BH-disabled transmit locking rules. This lets
+	 * a schedulable PREEMPT_RT thread block on sleeping spinlocks without
+	 * first disabling hard interrupts. Both paths set the explicit netpoll
+	 * marker used by stacked devices.
+	 */
+	irqs_off = irqs_disabled();
+
+	netpoll_tx_begin(irqs_off);
 
 	dev = np->dev;
 	/* npinfo->txq belongs to np->dev, so retries must stay bound to it. */
@@ -297,7 +370,7 @@ static netdev_tx_t __netpoll_send_skb(struct netpoll *np, struct sk_buff *skb)
 		txq = netdev_core_pick_tx(dev, skb, NULL);
 
 		/* try until next clock tick */
-		for (tries = jiffies_to_usecs(1)/USEC_PER_POLL;
+		for (tries = jiffies_to_usecs(1) / USEC_PER_POLL;
 		     tries > 0; --tries) {
 			if (HARD_TX_TRYLOCK(dev, txq)) {
 				if (!netif_xmit_stopped(txq))
@@ -311,15 +384,11 @@ static netdev_tx_t __netpoll_send_skb(struct netpoll *np, struct sk_buff *skb)
 			}
 
 			/* tickle device maybe there is some cleanup */
-			netpoll_poll_dev(np->dev);
+			if (netpoll_poll_allowed())
+				netpoll_poll_dev(np->dev);
 
 			udelay(USEC_PER_POLL);
 		}
-
-		WARN_ONCE(!irqs_disabled(),
-			"netpoll_send_skb_on_dev(): %s enabled interrupts in poll (%pS)\n",
-			dev->name, dev->netdev_ops->ndo_start_xmit);
-
 	}
 
 	if (!dev_xmit_complete(status)) {
@@ -335,23 +404,19 @@ static netdev_tx_t __netpoll_send_skb(struct netpoll *np, struct sk_buff *skb)
 	ret = NETDEV_TX_OK;
 out:
 	rcu_read_unlock();
+	netpoll_restore_irq(dev, irqs_off);
+	netpoll_tx_end(irqs_off);
 	return ret;
 }
 
 netdev_tx_t netpoll_send_skb(struct netpoll *np, struct sk_buff *skb)
 {
-	unsigned long flags;
-	netdev_tx_t ret;
-
 	if (unlikely(!np)) {
 		dev_kfree_skb_irq(skb);
-		ret = NET_XMIT_DROP;
-	} else {
-		local_irq_save(flags);
-		ret = __netpoll_send_skb(np, skb);
-		local_irq_restore(flags);
+		return NET_XMIT_DROP;
 	}
-	return ret;
+
+	return __netpoll_send_skb(np, skb);
 }
 EXPORT_SYMBOL(netpoll_send_skb);
 

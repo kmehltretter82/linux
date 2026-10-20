@@ -14,6 +14,9 @@ struct netdev_xmit {
 #ifdef CONFIG_NET_EGRESS
 	u8  skip_txqueue;
 #endif
+#ifdef CONFIG_NETPOLL
+	u8  netpoll_tx;
+#endif
 #if IS_ENABLED(CONFIG_NET_ACT_MIRRED)
 	u8			sched_mirred_nest;
 	struct net_device	*sched_mirred_dev[MIRRED_NEST_LIMIT];
