@@ -162,6 +162,26 @@ config REFCOUNT_INTERRUPT_KUNIT_TEST
 
 	  If unsure, say N.
 
+config IRQ_EXIT_TIMER_KUNIT_TEST
+	bool "KUnit test for the retained IRQ-exit timer wakeup"
+	depends on KUNIT=y
+	depends on ARM64 && SMP && IRQ_FORCED_THREADING
+	depends on PREEMPTION
+	depends on DEBUG_PREEMPT || TRACE_PREEMPT_TOGGLE
+	depends on FPROBE
+	help
+	  Build a development-only, architecture-specific regression oracle for
+	  timer softirqs raised after the normal IRQ-exit timer-thread wakeup.
+	  The test uses fprobes and a remote IPI to inject work into the retained
+	  hardirq teardown window. It requires the threadirqs command-line option
+	  unless PREEMPT_RT makes forced IRQ threading unconditional.
+
+	  The default test polarity requires a same-exit ktimerd wakeup. The
+	  irq_exit_timer_kunit.expect_same_exit_wake parameter can be set to N
+	  when running an expected-red control kernel.
+
+	  This option is only for development and testing. If unsure, say N.
+
 endmenu
 
 config GENERIC_IRQ_MULTI_HANDLER
