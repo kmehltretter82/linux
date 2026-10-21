@@ -4,6 +4,7 @@
 
 #include <linux/context_tracking_state.h>
 #include <linux/preempt.h>
+#include <linux/irqentry_hardirq.h>
 #include <linux/lockdep.h>
 #include <linux/ftrace_irq.h>
 #include <linux/sched.h>
