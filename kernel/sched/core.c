@@ -6028,7 +6028,7 @@ static inline void sched_tick_stop(int cpu) { }
  * If the value passed in is equal to the current preempt count
  * then we just disabled preemption. Start timing the latency.
  */
-static inline void preempt_latency_start(int val)
+static __always_inline void preempt_latency_start(int val)
 {
 	if (preempt_count() == val) {
 		unsigned long ip = get_lock_parent_ip();
@@ -6038,6 +6038,62 @@ static inline void preempt_latency_start(int val)
 		trace_preempt_off(CALLER_ADDR0, ip);
 	}
 }
+
+static __always_inline void preempt_count_add_debug_checks(void)
+{
+#ifdef CONFIG_DEBUG_PREEMPT
+	DEBUG_LOCKS_WARN_ON((preempt_count() & PREEMPT_MASK) >=
+				PREEMPT_MASK - 10);
+#endif
+}
+
+#if defined(CONFIG_DEBUG_PREEMPT) && \
+	!defined(CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS)
+/*
+ * Preserve the DEBUG_LOCKS_WARN_ON() add-or-reject decision without invoking
+ * instrumented reporting from noinstr entry code. The caller reaches this
+ * only after observing an already-negative count. Recheck after testing oops
+ * state to retain the original short-circuit order.
+ */
+struct irqentry_hardirq_cookie noinstr
+__irqentry_hardirq_count_start_slow(void)
+{
+	struct irqentry_hardirq_cookie cookie = { };
+
+	if (!READ_ONCE(oops_in_progress) && !irqentry_hardirq_count_valid())
+		return cookie;
+
+	__preempt_count_add(HARDIRQ_OFFSET);
+	cookie.applied = true;
+	return cookie;
+}
+NOKPROBE_SYMBOL(__irqentry_hardirq_count_start_slow);
+#endif
+
+/**
+ * irqentry_hardirq_count_finish - Finish a staged hardirq-count addition
+ * @cookie: Result of the matching irqentry_hardirq_count_start()
+ *
+ * Attempt to report a rejected addition and skip its post-add work, or
+ * complete the post-add debug checks and latency tracing for an applied
+ * addition, after an entry path had to stage the update before instrumentable
+ * code could run.
+ */
+void irqentry_hardirq_count_finish(struct irqentry_hardirq_cookie cookie)
+{
+#if defined(CONFIG_DEBUG_PREEMPT) && \
+	!defined(CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS)
+	bool applied = irqentry_hardirq_count_applied(cookie);
+
+	if (!applied) {
+		DEBUG_LOCKS_WARN_ON(!applied);
+		return;
+	}
+#endif
+	preempt_count_add_debug_checks();
+	preempt_latency_start(HARDIRQ_OFFSET);
+}
+NOKPROBE_SYMBOL(irqentry_hardirq_count_finish);
 
 void preempt_count_add(int val)
 {
@@ -6054,13 +6110,8 @@ void preempt_count_add(int val)
 		return;
 #endif
 	__preempt_count_add(val);
-#ifdef CONFIG_DEBUG_PREEMPT
-	/*
-	 * Spinlock count overflowing soon?
-	 */
-	DEBUG_LOCKS_WARN_ON((preempt_count() & PREEMPT_MASK) >=
-				PREEMPT_MASK - 10);
-#endif
+	preempt_count_add_debug_checks();
+	/* Keep latency attribution in the preempt_count_add() stack frame. */
 	preempt_latency_start(val);
 }
 EXPORT_SYMBOL(preempt_count_add);
@@ -6070,13 +6121,13 @@ NOKPROBE_SYMBOL(preempt_count_add);
  * If the value passed in equals to the current preempt count
  * then we just enabled preemption. Stop timing the latency.
  */
-static inline void preempt_latency_stop(int val)
+static __always_inline void preempt_latency_stop(int val)
 {
 	if (preempt_count() == val)
 		trace_preempt_on(CALLER_ADDR0, get_lock_parent_ip());
 }
 
-void preempt_count_sub(int val)
+static __always_inline bool preempt_count_sub_debug_checks(int val)
 {
 #ifdef CONFIG_DEBUG_PREEMPT
 	/*
@@ -6086,15 +6137,41 @@ void preempt_count_sub(int val)
 	unsigned int pc = preempt_count();
 
 	if (DEBUG_LOCKS_WARN_ON(pc - uval > pc))
-		return;
+		return false;
 	/*
 	 * Is the spinlock portion underflowing?
 	 */
 	if (DEBUG_LOCKS_WARN_ON((val < PREEMPT_MASK) &&
 			!(preempt_count() & PREEMPT_MASK)))
-		return;
+		return false;
 #endif
+	return true;
+}
 
+/**
+ * irqentry_hardirq_count_sub_prepare - Prepare a raw hardirq-count subtraction
+ *
+ * Run debug checks and latency tracing before an entry path performs a raw
+ * preempt count subtraction after all instrumentable code has returned.
+ *
+ * Return: true when the caller should perform the subtraction.
+ */
+bool irqentry_hardirq_count_sub_prepare(void)
+{
+	if (!preempt_count_sub_debug_checks(HARDIRQ_OFFSET))
+		return false;
+
+	preempt_latency_stop(HARDIRQ_OFFSET);
+	return true;
+}
+NOKPROBE_SYMBOL(irqentry_hardirq_count_sub_prepare);
+
+void preempt_count_sub(int val)
+{
+	if (!preempt_count_sub_debug_checks(val))
+		return;
+
+	/* Keep latency attribution in the preempt_count_sub() stack frame. */
 	preempt_latency_stop(val);
 	__preempt_count_sub(val);
 }
