@@ -127,7 +127,9 @@ config RV_MONITORS_KUNIT_TEST
 	  These tests verify that monitors correctly detect violations by
 	  triggering fake events and validating the expected reactions.
 
-	  Enabling this may slightly increase overhead of some monitors if any
-	  unrelated KUnit test is running.
+	  Building this option, including as a module, adds test-only hooks to
+	  some monitored paths. KUnit's static key keeps the hooks dormant while
+	  no test is running. Running this or another KUnit suite can temporarily
+	  add slight overhead to those paths.
 
 	  If unsure, say N.
