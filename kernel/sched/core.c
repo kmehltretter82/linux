@@ -7593,12 +7593,16 @@ EXPORT_SYMBOL(dynamic_preempt_schedule_notrace);
  */
 asmlinkage __visible void __sched preempt_schedule_irq(void)
 {
+	struct task_struct *owner = current;
 	enum ctx_state prev_state;
 
 	/* Catch callers which need to be fixed */
 	BUG_ON(preempt_count() || !irqs_disabled());
 
 	prev_state = exception_enter();
+	/* Sample before tracing bookkeeping can change the observed context. */
+	if (trace_sched_irq_preempt_entry_enabled())
+		trace_sched_irq_preempt_entry(owner, preempt_count(), irqs_disabled());
 
 	do {
 		preempt_disable();
@@ -7608,6 +7612,8 @@ asmlinkage __visible void __sched preempt_schedule_irq(void)
 		sched_preempt_enable_no_resched();
 	} while (need_resched());
 
+	if (trace_sched_irq_preempt_exit_enabled())
+		trace_sched_irq_preempt_exit(owner, preempt_count(), irqs_disabled());
 	exception_exit(prev_state);
 }
 
