@@ -630,6 +630,16 @@ struct softirq_kunit_empty_worker {
 static DEFINE_PER_CPU(struct softirq_kunit_empty_worker,
 			      softirq_kunit_empty_workers);
 
+bool softirq_kunit_local_bh_blocked(void)
+{
+#ifdef CONFIG_PREEMPT_RT
+	return local_bh_blocked();
+#else
+	return false;
+#endif
+}
+EXPORT_SYMBOL_IF_KUNIT(softirq_kunit_local_bh_blocked);
+
 /*
  * Exercise the worker boundaries without entering handle_softirqs().
  *
@@ -1038,7 +1048,10 @@ static inline void __irq_exit_rcu(void)
 
 		trace_hardirq_context_exit(hardirq_count() >> HARDIRQ_SHIFT);
 
-		/* Hand work raised by the final boundary event to its worker. */
+		/*
+		 * Hand off work raised after normal softirq processing, including
+		 * by tick-exit and final-boundary callbacks.
+		 */
 		if (hardirq_count() == HARDIRQ_OFFSET) {
 			if (irq_count() == HARDIRQ_OFFSET &&
 			    unlikely(local_softirq_pending()) &&
