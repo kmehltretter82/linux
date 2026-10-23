@@ -16,11 +16,13 @@
  */
 
 #include <linux/atomic.h>
+#include <linux/completion.h>
 #include <linux/cpu.h>
 #include <linux/delay.h>
 #include <linux/fprobe.h>
 #include <linux/hardirq.h>
 #include <linux/interrupt.h>
+#include <linux/jiffies.h>
 #include <linux/kallsyms.h>
 #include <linux/moduleparam.h>
 #include <linux/sched.h>
@@ -467,8 +469,442 @@ out_clear:
 	WRITE_ONCE(irq_exit_timer_active_ctx, NULL);
 }
 
+enum irq_exit_cross_mode {
+	IRQ_EXIT_CROSS_K_TO_T,
+	IRQ_EXIT_CROSS_T_TO_K_TO_T,
+};
+
+enum irq_exit_cross_phase {
+	IRQ_EXIT_CROSS_IDLE,
+	IRQ_EXIT_CROSS_WAIT_TRIGGER,
+	IRQ_EXIT_CROSS_ARMED,
+	IRQ_EXIT_CROSS_INJECTING,
+	IRQ_EXIT_CROSS_INJECTED,
+	IRQ_EXIT_CROSS_RAISING,
+	IRQ_EXIT_CROSS_K1_DONE,
+	IRQ_EXIT_CROSS_T_DONE,
+	IRQ_EXIT_CROSS_COMPLETE,
+	IRQ_EXIT_CROSS_STALE,
+};
+
+enum irq_exit_cross_worker {
+	IRQ_EXIT_CROSS_WORKER_K,
+	IRQ_EXIT_CROSS_WORKER_T,
+};
+
+struct irq_exit_cross_wake {
+	int worker;
+	int cpu;
+	unsigned int irq_count;
+	unsigned int softirq_pending;
+	unsigned long timer_pending;
+	bool irqs_disabled;
+};
+
+struct irq_exit_cross_ctx {
+	atomic_t phase;
+	atomic_t inject_count;
+	atomic_t wake_count;
+	atomic_t stale_count;
+	enum irq_exit_cross_mode mode;
+	int target_cpu;
+	int tasklet_cpu;
+	struct task_struct *target_ksoftirqd;
+	struct task_struct *target_ktimerd;
+	unsigned long wrapper_start;
+	unsigned long wrapper_end;
+	unsigned int inject_softirq_before;
+	unsigned int inject_softirq_after;
+	unsigned long inject_timer_before;
+	unsigned long inject_timer_after;
+	struct irq_exit_cross_wake wake[2];
+	struct tasklet_struct tasklet;
+	struct completion tasklet_done;
+};
+
+static struct irq_exit_cross_ctx *irq_exit_cross_active_ctx;
+
+static bool irq_exit_cross_retained_return(struct irq_exit_cross_ctx *ctx,
+					   unsigned long ret_ip)
+{
+	return ret_ip >= ctx->wrapper_start && ret_ip < ctx->wrapper_end;
+}
+
+static void irq_exit_cross_tasklet(struct tasklet_struct *tasklet)
+{
+	struct irq_exit_cross_ctx *ctx;
+
+	ctx = from_tasklet(ctx, tasklet, tasklet);
+	WRITE_ONCE(ctx->tasklet_cpu, raw_smp_processor_id());
+	complete(&ctx->tasklet_done);
+}
+
+static void irq_exit_cross_record_wake(struct irq_exit_cross_ctx *ctx,
+				       enum irq_exit_cross_worker worker)
+{
+	struct irq_exit_cross_wake *wake;
+	int index = atomic_fetch_inc(&ctx->wake_count);
+
+	if (index >= ARRAY_SIZE(ctx->wake))
+		return;
+
+	wake = &ctx->wake[index];
+	wake->worker = worker;
+	wake->cpu = raw_smp_processor_id();
+	wake->irq_count = irq_count();
+	wake->irqs_disabled = irqs_disabled();
+	wake->softirq_pending = local_softirq_pending();
+	wake->timer_pending = local_timers_pending_force_th();
+}
+
+static notrace void irq_exit_cross_inject(struct fprobe *fp,
+					  unsigned long entry_ip,
+					  unsigned long ret_ip,
+					  struct ftrace_regs *fregs,
+					  void *entry_data)
+{
+	struct irq_exit_cross_ctx *ctx = READ_ONCE(irq_exit_cross_active_ctx);
+
+	if (!ctx || raw_smp_processor_id() != READ_ONCE(ctx->target_cpu) ||
+	    irq_count() != HARDIRQ_OFFSET ||
+	    !irq_exit_cross_retained_return(ctx, ret_ip) ||
+	    atomic_cmpxchg(&ctx->phase, IRQ_EXIT_CROSS_ARMED,
+			   IRQ_EXIT_CROSS_INJECTING) != IRQ_EXIT_CROSS_ARMED)
+		return;
+
+	WRITE_ONCE(ctx->inject_softirq_before, local_softirq_pending());
+	WRITE_ONCE(ctx->inject_timer_before, local_timers_pending_force_th());
+
+	if (READ_ONCE(ctx->mode) == IRQ_EXIT_CROSS_K_TO_T)
+		tasklet_schedule(&ctx->tasklet);
+	else
+		raise_timer_softirq(TIMER_SOFTIRQ);
+
+	WRITE_ONCE(ctx->inject_softirq_after, local_softirq_pending());
+	WRITE_ONCE(ctx->inject_timer_after, local_timers_pending_force_th());
+	atomic_inc(&ctx->inject_count);
+	atomic_set_release(&ctx->phase, IRQ_EXIT_CROSS_INJECTED);
+}
+
+static notrace int irq_exit_cross_wake(struct fprobe *fp,
+				       unsigned long entry_ip,
+				       unsigned long ret_ip,
+				       struct ftrace_regs *fregs,
+				       void *entry_data)
+{
+	struct irq_exit_cross_ctx *ctx = READ_ONCE(irq_exit_cross_active_ctx);
+	struct task_struct *task;
+	int phase;
+
+	if (!ctx || raw_smp_processor_id() != READ_ONCE(ctx->target_cpu) ||
+	    irq_count() != HARDIRQ_OFFSET || !irqs_disabled() ||
+	    !irq_exit_cross_retained_return(ctx, ret_ip) ||
+	    !ftrace_regs_has_args(fregs))
+		return 0;
+
+	task = (struct task_struct *)ftrace_regs_get_argument(fregs, 0);
+	phase = atomic_read_acquire(&ctx->phase);
+
+	if (READ_ONCE(ctx->mode) == IRQ_EXIT_CROSS_K_TO_T) {
+		if (phase == IRQ_EXIT_CROSS_INJECTED &&
+		    task == READ_ONCE(ctx->target_ksoftirqd) &&
+		    atomic_cmpxchg(&ctx->phase, IRQ_EXIT_CROSS_INJECTED,
+				   IRQ_EXIT_CROSS_RAISING) ==
+				   IRQ_EXIT_CROSS_INJECTED) {
+			irq_exit_cross_record_wake(ctx, IRQ_EXIT_CROSS_WORKER_K);
+			raise_timer_softirq(TIMER_SOFTIRQ);
+			atomic_set_release(&ctx->phase, IRQ_EXIT_CROSS_K1_DONE);
+		} else if (phase == IRQ_EXIT_CROSS_K1_DONE &&
+			   task == READ_ONCE(ctx->target_ktimerd) &&
+			   atomic_cmpxchg(&ctx->phase, IRQ_EXIT_CROSS_K1_DONE,
+					  IRQ_EXIT_CROSS_RAISING) ==
+					  IRQ_EXIT_CROSS_K1_DONE) {
+			irq_exit_cross_record_wake(ctx, IRQ_EXIT_CROSS_WORKER_T);
+			atomic_set_release(&ctx->phase, IRQ_EXIT_CROSS_COMPLETE);
+		}
+	} else {
+		if (phase == IRQ_EXIT_CROSS_INJECTED &&
+		    task == READ_ONCE(ctx->target_ktimerd) &&
+		    atomic_cmpxchg(&ctx->phase, IRQ_EXIT_CROSS_INJECTED,
+				   IRQ_EXIT_CROSS_RAISING) ==
+				   IRQ_EXIT_CROSS_INJECTED) {
+			irq_exit_cross_record_wake(ctx, IRQ_EXIT_CROSS_WORKER_T);
+			tasklet_schedule(&ctx->tasklet);
+			atomic_set_release(&ctx->phase, IRQ_EXIT_CROSS_T_DONE);
+		} else if (phase == IRQ_EXIT_CROSS_T_DONE &&
+			   task == READ_ONCE(ctx->target_ksoftirqd) &&
+			   atomic_cmpxchg(&ctx->phase, IRQ_EXIT_CROSS_T_DONE,
+					  IRQ_EXIT_CROSS_RAISING) ==
+					  IRQ_EXIT_CROSS_T_DONE) {
+			irq_exit_cross_record_wake(ctx, IRQ_EXIT_CROSS_WORKER_K);
+			/*
+			 * Exercise the final edge in the closure proof. The timer
+			 * worker was already requested, so no fourth check is needed.
+			 */
+			raise_timer_softirq(TIMER_SOFTIRQ);
+			atomic_set_release(&ctx->phase, IRQ_EXIT_CROSS_COMPLETE);
+		}
+	}
+
+	return 0;
+}
+
+static notrace int irq_exit_cross_enter(struct fprobe *fp,
+					unsigned long entry_ip,
+					unsigned long ret_ip,
+					struct ftrace_regs *fregs,
+					void *entry_data)
+{
+	struct irq_exit_cross_ctx *ctx = READ_ONCE(irq_exit_cross_active_ctx);
+	int phase;
+
+	if (!ctx || raw_smp_processor_id() != READ_ONCE(ctx->target_cpu))
+		return 0;
+
+	phase = atomic_read_acquire(&ctx->phase);
+	if (phase < IRQ_EXIT_CROSS_ARMED || phase == IRQ_EXIT_CROSS_COMPLETE ||
+	    phase == IRQ_EXIT_CROSS_STALE)
+		return 0;
+
+	if (atomic_cmpxchg(&ctx->phase, phase, IRQ_EXIT_CROSS_STALE) == phase)
+		atomic_inc(&ctx->stale_count);
+
+	return 0;
+}
+
+static void irq_exit_cross_trigger(void *data)
+{
+	struct irq_exit_cross_ctx *ctx = data;
+
+	atomic_cmpxchg(&ctx->phase, IRQ_EXIT_CROSS_WAIT_TRIGGER,
+		       IRQ_EXIT_CROSS_ARMED);
+}
+
+static void irq_exit_cross_close(void *data)
+{
+}
+
+static void irq_exit_cross_snapshot(void *data)
+{
+	struct irq_exit_timer_remote *remote = data;
+
+	remote->cpu = raw_smp_processor_id();
+	remote->timer_pending = local_timers_pending_force_th();
+	remote->softirq_pending = local_softirq_pending();
+}
+
+static bool irq_exit_cross_drain(struct irq_exit_cross_ctx *ctx)
+{
+	struct irq_exit_timer_remote remote;
+	int i, ret;
+
+	for (i = 0; i < IRQ_EXIT_TIMER_DRAIN_POLLS; i++) {
+		memset(&remote, 0, sizeof(remote));
+		remote.cpu = -1;
+		ret = smp_call_function_single(ctx->target_cpu,
+					       irq_exit_cross_snapshot, &remote, 1);
+		if (ret)
+			return false;
+		if (remote.cpu == ctx->target_cpu && !remote.timer_pending &&
+		    !remote.softirq_pending)
+			return true;
+		usleep_range(1000, 2000);
+	}
+
+	return false;
+}
+
+static void irq_exit_cross_reset(struct irq_exit_cross_ctx *ctx,
+				 enum irq_exit_cross_mode mode)
+{
+	ctx->mode = mode;
+	ctx->tasklet_cpu = -1;
+	ctx->inject_softirq_before = 0;
+	ctx->inject_softirq_after = 0;
+	ctx->inject_timer_before = 0;
+	ctx->inject_timer_after = 0;
+	memset(ctx->wake, 0, sizeof(ctx->wake));
+	atomic_set(&ctx->inject_count, 0);
+	atomic_set(&ctx->wake_count, 0);
+	atomic_set(&ctx->stale_count, 0);
+	atomic_set(&ctx->phase, IRQ_EXIT_CROSS_IDLE);
+	reinit_completion(&ctx->tasklet_done);
+}
+
+static bool irq_exit_cross_attempt(struct irq_exit_cross_ctx *ctx,
+				   enum irq_exit_cross_mode mode)
+{
+	unsigned long timeout = msecs_to_jiffies(1000);
+	int ret;
+
+	irq_exit_cross_reset(ctx, mode);
+	if (!irq_exit_cross_drain(ctx))
+		return false;
+
+	atomic_set(&ctx->phase, IRQ_EXIT_CROSS_WAIT_TRIGGER);
+	ret = smp_call_function_single(ctx->target_cpu, irq_exit_cross_trigger,
+				       ctx, 1);
+	if (ret)
+		return false;
+
+	/* Fence the first IPI's complete hardirq exit. */
+	ret = smp_call_function_single(ctx->target_cpu, irq_exit_cross_close,
+				       NULL, 1);
+	if (ret || atomic_read_acquire(&ctx->phase) != IRQ_EXIT_CROSS_COMPLETE)
+		return false;
+
+	if (!wait_for_completion_timeout(&ctx->tasklet_done, timeout))
+		return false;
+
+	return irq_exit_cross_drain(ctx);
+}
+
+static void irq_exit_cross_check(struct kunit *test,
+				 struct irq_exit_cross_ctx *ctx,
+				 enum irq_exit_cross_mode mode)
+{
+	int first = mode == IRQ_EXIT_CROSS_K_TO_T ?
+		IRQ_EXIT_CROSS_WORKER_K : IRQ_EXIT_CROSS_WORKER_T;
+	int second = mode == IRQ_EXIT_CROSS_K_TO_T ?
+		IRQ_EXIT_CROSS_WORKER_T : IRQ_EXIT_CROSS_WORKER_K;
+	int i;
+
+	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->inject_count), 1);
+	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->wake_count), 2);
+	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->stale_count), 0);
+	KUNIT_EXPECT_EQ(test, ctx->wake[0].worker, first);
+	KUNIT_EXPECT_EQ(test, ctx->wake[1].worker, second);
+	KUNIT_EXPECT_EQ(test, ctx->tasklet_cpu, ctx->target_cpu);
+	KUNIT_EXPECT_EQ(test, ctx->inject_softirq_before, 0U);
+	KUNIT_EXPECT_EQ(test, ctx->inject_timer_before, 0UL);
+
+	if (mode == IRQ_EXIT_CROSS_K_TO_T) {
+		KUNIT_EXPECT_TRUE(test, !!(ctx->inject_softirq_after &
+					  BIT(TASKLET_SOFTIRQ)));
+		KUNIT_EXPECT_EQ(test, ctx->inject_timer_after, 0UL);
+		KUNIT_EXPECT_TRUE(test, !!(ctx->wake[1].timer_pending &
+					  BIT(TIMER_SOFTIRQ)));
+	} else {
+		KUNIT_EXPECT_EQ(test, ctx->inject_softirq_after, 0U);
+		KUNIT_EXPECT_TRUE(test, !!(ctx->inject_timer_after &
+					  BIT(TIMER_SOFTIRQ)));
+		KUNIT_EXPECT_TRUE(test, !!(ctx->wake[1].softirq_pending &
+					  BIT(TASKLET_SOFTIRQ)));
+	}
+
+	for (i = 0; i < ARRAY_SIZE(ctx->wake); i++) {
+		KUNIT_EXPECT_EQ(test, ctx->wake[i].cpu, ctx->target_cpu);
+		KUNIT_EXPECT_EQ(test, ctx->wake[i].irq_count,
+				(unsigned int)HARDIRQ_OFFSET);
+		KUNIT_EXPECT_TRUE(test, ctx->wake[i].irqs_disabled);
+	}
+
+	kunit_info(test, "mode=%d sequence=%c%c phase=%d tasklet_cpu=%d\n",
+		   mode, first ? 'T' : 'K', second ? 'T' : 'K',
+		   atomic_read_acquire(&ctx->phase), ctx->tasklet_cpu);
+}
+
+static void irq_exit_cross_raise_test(struct kunit *test)
+{
+	struct fprobe inject_probe = {
+		.exit_handler = irq_exit_cross_inject,
+	};
+	struct fprobe wake_probe = {
+		.entry_handler = irq_exit_cross_wake,
+	};
+	struct fprobe enter_probe = {
+		.entry_handler = irq_exit_cross_enter,
+	};
+	struct irq_exit_cross_ctx ctx = {
+		.target_cpu = -1,
+	};
+	unsigned long wrapper_offset, wrapper_size;
+	bool inject_registered = false;
+	bool wake_registered = false;
+	bool enter_registered = false;
+	int cpu, mode, ret;
+
+	if (!force_irqthreads()) {
+		kunit_skip(test, "requires forced IRQ threading (boot with threadirqs)");
+		return;
+	}
+
+	ctx.wrapper_start = (unsigned long)irq_exit_rcu_preempt_counted_prepare;
+	if (!kallsyms_lookup_size_offset(ctx.wrapper_start, &wrapper_size,
+					 &wrapper_offset) || wrapper_offset) {
+		KUNIT_FAIL(test, "cannot resolve retained IRQ-exit wrapper bounds");
+		return;
+	}
+	ctx.wrapper_end = ctx.wrapper_start + wrapper_size;
+	init_completion(&ctx.tasklet_done);
+	tasklet_setup(&ctx.tasklet, irq_exit_cross_tasklet);
+	WRITE_ONCE(irq_exit_cross_active_ctx, &ctx);
+
+	ret = register_fprobe(&inject_probe, "preempt_count_sub_prepare", NULL);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		goto out_clear;
+	inject_registered = true;
+
+	ret = register_fprobe(&wake_probe, "wake_up_process", NULL);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		goto out_unregister;
+	wake_registered = true;
+
+	ret = register_fprobe(&enter_probe, "irq_enter_rcu_preempt_counted", NULL);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		goto out_unregister;
+	enter_registered = true;
+
+	cpus_read_lock();
+	migrate_disable();
+	cpu = raw_smp_processor_id();
+	ctx.target_cpu = cpumask_any_but(cpu_online_mask, cpu);
+	if (ctx.target_cpu >= nr_cpu_ids) {
+		kunit_mark_skipped(test, "requires two online CPUs");
+		goto out_enable_migration;
+	}
+
+	ctx.target_ksoftirqd = per_cpu(ksoftirqd, ctx.target_cpu);
+	ctx.target_ktimerd = per_cpu(ktimerd, ctx.target_cpu);
+	if (!ctx.target_ksoftirqd || !ctx.target_ktimerd) {
+		kunit_mark_skipped(test, "target CPU lacks a softirq worker");
+		goto out_enable_migration;
+	}
+
+	for (mode = IRQ_EXIT_CROSS_K_TO_T;
+	     mode <= IRQ_EXIT_CROSS_T_TO_K_TO_T; mode++) {
+		bool passed = irq_exit_cross_attempt(&ctx, mode);
+
+		KUNIT_EXPECT_TRUE(test, passed);
+		if (passed)
+			irq_exit_cross_check(test, &ctx, mode);
+		tasklet_kill(&ctx.tasklet);
+		tasklet_setup(&ctx.tasklet, irq_exit_cross_tasklet);
+	}
+
+out_enable_migration:
+	migrate_enable();
+	cpus_read_unlock();
+
+out_unregister:
+	atomic_set(&ctx.phase, IRQ_EXIT_CROSS_IDLE);
+	if (enter_registered)
+		KUNIT_EXPECT_EQ(test, unregister_fprobe(&enter_probe), 0);
+	if (wake_registered)
+		KUNIT_EXPECT_EQ(test, unregister_fprobe(&wake_probe), 0);
+	if (inject_registered)
+		KUNIT_EXPECT_EQ(test, unregister_fprobe(&inject_probe), 0);
+	tasklet_kill(&ctx.tasklet);
+out_clear:
+	WRITE_ONCE(irq_exit_cross_active_ctx, NULL);
+}
+
 static struct kunit_case irq_exit_timer_test_cases[] = {
 	KUNIT_CASE(irq_exit_timer_closure_test),
+	KUNIT_CASE(irq_exit_cross_raise_test),
 	{}
 };
 
