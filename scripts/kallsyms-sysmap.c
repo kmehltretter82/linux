@@ -201,7 +201,7 @@ static struct sysmap_symbol *elf_read_symbols(const struct elf_file *elf,
 		const char *name = elf->strtab + sym_name(sym);
 		char type = elf_symbol_type(elf, sym);
 
-		if (!type || sysmap_omits(name, type))
+		if (!name[0] || !type || sysmap_omits(name, type))
 			continue;
 
 		syms[n].addr = sym_value(sym);
