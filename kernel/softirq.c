@@ -20,6 +20,7 @@
 #include <linux/notifier.h>
 #include <linux/percpu.h>
 #include <linux/cpu.h>
+#include <linux/delay.h>
 #include <linux/freezer.h>
 #include <linux/kthread.h>
 #include <linux/rcupdate.h>
@@ -1339,8 +1340,81 @@ static struct smp_hotplug_thread timer_thread = {
 };
 #endif
 
+#ifdef CONFIG_IRQ_EXIT_EARLY_WORKER_TEST
+#define IRQ_EXIT_EARLY_WORKER_POLLS	100
+
+static atomic_t irq_exit_early_tasklet_ran = ATOMIC_INIT(0);
+static int irq_exit_early_test_cpu = -1;
+static bool irq_exit_early_null_ksoftirqd;
+static bool irq_exit_early_null_ktimerd;
+static bool irq_exit_early_clean_timer;
+static struct tasklet_struct irq_exit_early_tasklet;
+
+static void irq_exit_early_tasklet_fn(struct tasklet_struct *unused)
+{
+	atomic_inc(&irq_exit_early_tasklet_ran);
+}
+
+static void __init irq_exit_early_worker_arm(void)
+{
+	unsigned long flags;
+
+	irq_exit_early_test_cpu = raw_smp_processor_id();
+	tasklet_setup(&irq_exit_early_tasklet, irq_exit_early_tasklet_fn);
+
+	local_irq_save(flags);
+	irq_exit_early_null_ksoftirqd = !__this_cpu_read(ksoftirqd);
+	irq_exit_early_null_ktimerd = !__this_cpu_read(ktimerd);
+	irq_exit_early_clean_timer = !local_timers_pending_force_th();
+
+	/* tasklet_schedule() attempts the intentionally NULL ksoftirqd wake. */
+	tasklet_schedule(&irq_exit_early_tasklet);
+	raise_ktimers_thread(TIMER_SOFTIRQ);
+	wake_timersd();
+	local_irq_restore(flags);
+}
+
+static bool __init irq_exit_early_worker_check(void)
+{
+	int cpu = irq_exit_early_test_cpu;
+	int i;
+
+	for (i = 0; i < IRQ_EXIT_EARLY_WORKER_POLLS; i++) {
+		if (atomic_read(&irq_exit_early_tasklet_ran) == 1 &&
+		    !READ_ONCE(per_cpu(pending_timer_softirq, cpu)))
+			break;
+		usleep_range(1000, 2000);
+	}
+
+	return irq_exit_early_null_ksoftirqd &&
+	       irq_exit_early_null_ktimerd && irq_exit_early_clean_timer &&
+	       per_cpu(ksoftirqd, cpu) && per_cpu(ktimerd, cpu) &&
+	       atomic_read(&irq_exit_early_tasklet_ran) == 1 &&
+	       !READ_ONCE(per_cpu(pending_timer_softirq, cpu));
+}
+
+static void __init irq_exit_early_worker_report(bool passed)
+{
+	pr_info("EARLY_WORKER_TEST passed=%c cpu=%d null_k=%c null_t=%c tasklet_runs=%d timer_pending=0x%lx\n",
+		passed ? 'Y' : 'N', irq_exit_early_test_cpu,
+		irq_exit_early_null_ksoftirqd ? 'Y' : 'N',
+		irq_exit_early_null_ktimerd ? 'Y' : 'N',
+		atomic_read(&irq_exit_early_tasklet_ran),
+		READ_ONCE(per_cpu(pending_timer_softirq,
+				  irq_exit_early_test_cpu)));
+	tasklet_kill(&irq_exit_early_tasklet);
+}
+#else
+static inline void irq_exit_early_worker_arm(void) { }
+static inline bool irq_exit_early_worker_check(void) { return true; }
+static inline void irq_exit_early_worker_report(bool passed) { }
+#endif
+
 static __init int spawn_ksoftirqd(void)
 {
+	bool early_worker_test_passed;
+
+	irq_exit_early_worker_arm();
 	cpuhp_setup_state_nocalls(CPUHP_SOFTIRQ_DEAD, "softirq:dead", NULL,
 				  takeover_tasklets);
 	BUG_ON(smpboot_register_percpu_thread(&softirq_threads));
@@ -1348,7 +1422,9 @@ static __init int spawn_ksoftirqd(void)
 	if (force_irqthreads())
 		BUG_ON(smpboot_register_percpu_thread(&timer_thread));
 #endif
-	return 0;
+	early_worker_test_passed = irq_exit_early_worker_check();
+	irq_exit_early_worker_report(early_worker_test_passed);
+	return early_worker_test_passed ? 0 : -EINVAL;
 }
 early_initcall(spawn_ksoftirqd);
 

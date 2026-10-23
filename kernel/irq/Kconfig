@@ -182,6 +182,18 @@ config IRQ_EXIT_TIMER_KUNIT_TEST
 
 	  This option is only for development and testing. If unsure, say N.
 
+config IRQ_EXIT_EARLY_WORKER_TEST
+	bool "Test pending softirqs before worker registration"
+	depends on IRQ_EXIT_TIMER_KUNIT_TEST
+	depends on PREEMPT_RT
+	help
+	  Queue regular and forced-thread timer softirq work while the boot
+	  CPU's ksoftirqd and ktimerd pointers are still NULL. Verify that
+	  registering and unparking the workers drains both kinds of work.
+
+	  This deliberately perturbs early boot and is only a development
+	  oracle. If unsure, say N.
+
 endmenu
 
 config GENERIC_IRQ_MULTI_HANDLER
