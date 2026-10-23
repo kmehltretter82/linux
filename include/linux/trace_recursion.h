@@ -25,21 +25,18 @@ enum {
 	TRACE_FTRACE_NMI_BIT,
 	TRACE_FTRACE_IRQ_BIT,
 	TRACE_FTRACE_SIRQ_BIT,
-	TRACE_FTRACE_TRANSITION_BIT,
 
 	/* Internal use recursion bits */
 	TRACE_INTERNAL_BIT,
 	TRACE_INTERNAL_NMI_BIT,
 	TRACE_INTERNAL_IRQ_BIT,
 	TRACE_INTERNAL_SIRQ_BIT,
-	TRACE_INTERNAL_TRANSITION_BIT,
 
 	/* Internal event use recursion bits */
 	TRACE_INTERNAL_EVENT_BIT,
 	TRACE_INTERNAL_EVENT_NMI_BIT,
 	TRACE_INTERNAL_EVENT_IRQ_BIT,
 	TRACE_INTERNAL_EVENT_SIRQ_BIT,
-	TRACE_INTERNAL_EVENT_TRANSITION_BIT,
 
 	TRACE_BRANCH_BIT,
 /*
@@ -81,7 +78,6 @@ enum {
 	TRACE_CTX_IRQ,
 	TRACE_CTX_SOFTIRQ,
 	TRACE_CTX_NORMAL,
-	TRACE_CTX_TRANSITION,
 };
 
 static __always_inline int trace_get_context_bit(void)
@@ -139,20 +135,9 @@ static __always_inline int trace_test_and_set_recursion(unsigned long ip, unsign
 
 	bit = trace_get_context_bit() + start;
 	if (unlikely(val & (1 << bit))) {
-		/*
-		 * If an interrupt occurs during a trace, and another trace
-		 * happens in that interrupt but before the preempt_count is
-		 * updated to reflect the new interrupt context, then this
-		 * will think a recursion occurred, and the event will be dropped.
-		 * Let a single instance happen via the TRANSITION_BIT to
-		 * not drop those events.
-		 */
-		bit = TRACE_CTX_TRANSITION + start;
-		if (val & (1 << bit)) {
-			do_ftrace_record_recursion(ip, pip);
-			preempt_enable_notrace();
-			return -1;
-		}
+		do_ftrace_record_recursion(ip, pip);
+		preempt_enable_notrace();
+		return -1;
 	}
 
 	val |= 1 << bit;
