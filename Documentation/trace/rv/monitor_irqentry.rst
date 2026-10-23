@@ -76,20 +76,56 @@ IRQ-disabled processing-loop boundaries.
 
 The model has six states: ``idle``, ``in_hardirq``, ``in_softirq``,
 ``hardirq_from_softirq``, ``softirq_from_hardirq``, and
-``hardirq_from_softirq_from_hardirq``. It accepts these outer-context
-sequences::
+``hardirq_from_softirq_from_hardirq``. The initial and accepting state is
+``idle``. The following schematics omit the guards listed above. To keep the
+state names short, ``A > B`` denotes the state reached when context ``B`` is
+entered from context ``A``; it does not imply that both context-count
+components remain set::
 
-  idle -> in_hardirq -> idle
-  idle -> in_softirq -> idle
-  in_softirq -> hardirq_from_softirq -> in_softirq
-  in_hardirq -> softirq_from_hardirq -> in_hardirq
-  softirq_from_hardirq -> hardirq_from_softirq_from_hardirq
-                        -> softirq_from_hardirq
+              hardirq_exit
+    +----------------------------+
+    |                            v
+  +---------+  hardirq_entry   #=================================#
+  | hardirq | <--------------- H              idle               H <+
+  +---------+                  #=================================#  |
+                                 |                                  |
+                                 | softirq_entry                    | softirq_exit
+                                 | softirq_resume                   | softirq_suspend
+                                 v                                  |
+                               +---------------------------------+  |
+               +-------------> |             softirq             | -+
+               |               +---------------------------------+
+               |                 |
+               | hardirq_exit    | hardirq_entry
+               |                 v
+               |               +---------------------------------+
+               +-------------- |        softirq > hardirq        |
+                               +---------------------------------+
 
-The fourth sequence represents non-RT softirq processing during interrupt
-return. The kernel replaces ``HARDIRQ_OFFSET`` with ``SOFTIRQ_OFFSET`` while
-the handlers run, then restores hardirq state before completing interrupt
-exit. The fifth sequence represents a nested hardirq during those handlers.
+The softirq interval during hardirq return and a hardirq nested within that
+interval form the remaining part of the model::
+
+                   +-----------------------------+
+                   |           hardirq           | <+
+                   +-----------------------------+  |
+                     |                              |
+                     | softirq_entry_from_hardirq   | softirq_exit_to_hardirq
+                     v                              |
+                   +-----------------------------+  |
+    +------------> |      hardirq > softirq      | -+
+    |              +-----------------------------+
+    |                |
+    | hardirq_exit   | hardirq_entry
+    |                v
+    |              +-----------------------------+
+    +------------- | hardirq > softirq > hardirq |
+                   +-----------------------------+
+
+The ``softirq_from_hardirq`` state represents non-RT softirq processing
+during interrupt return. The kernel replaces ``HARDIRQ_OFFSET`` with
+``SOFTIRQ_OFFSET`` while the handlers run, then restores hardirq state before
+completing interrupt exit. The ``hardirq_from_softirq_from_hardirq`` state
+represents a nested hardirq during those handlers.
 
 On PREEMPT_RT, serving-softirq state is task-local and the serving interval is
 preemptible.  A switch away from that task suspends its CPU context
@@ -163,10 +199,28 @@ The RV adapter still evaluates its original live-context guards; the raw
 record is an independent diagnostic channel, not a replacement verdict.
 
 The model has three states: ``idle``, ``rescheduling``, and ``suspended``.
-Entry changes ``idle`` to ``rescheduling``; return changes it back to
-``idle``. Switching out an active invocation changes ``rescheduling`` to
-``suspended``; switching that task in resumes ``rescheduling``. The
-incoming event cannot require its target to be current: ``sched_switch``
+The initial and accepting state is ``idle``. The schematic omits the guards
+described above::
+
+      switch_in / switch_out   #================#
+    +------------------------- H                H
+    |                          H      idle      H
+    +------------------------> H                H <+
+                               #================#  |
+                                 |                 |
+                                 | resched_entry   | resched_exit
+                                 v                 |
+                               +----------------+  |
+    +------------------------> |  rescheduling  | -+
+    |                          +----------------+
+    |                            |
+    | switch_in                  | switch_out
+    |                            v
+    |                          +----------------+
+    +------------------------- |   suspended    |
+                               +----------------+
+
+The incoming event cannot require its target to be current: ``sched_switch``
 still executes in the outgoing task. Local interrupts remain disabled
 until the incoming task runs.
 
