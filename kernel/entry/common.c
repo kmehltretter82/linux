@@ -123,7 +123,7 @@ noinstr irqentry_state_t irqentry_enter(struct pt_regs *regs)
 }
 
 /**
- * irqentry_hardirq_enter - Establish state for ordinary hardirq entry
+ * __irqentry_hardirq_enter - Establish state for ordinary hardirq entry
  * @regs: Pointer to the interrupted register state
  *
  * Install the raw hardirq count before anything instrumentable can run. Then
@@ -134,7 +134,7 @@ noinstr irqentry_state_t irqentry_enter(struct pt_regs *regs)
  *
  * Returns: An opaque object for the matching irqentry exit operation.
  */
-noinstr irqentry_state_t irqentry_hardirq_enter(struct pt_regs *regs)
+noinstr irqentry_state_t __irqentry_hardirq_enter(struct pt_regs *regs)
 {
 	__preempt_count_add(HARDIRQ_OFFSET);
 

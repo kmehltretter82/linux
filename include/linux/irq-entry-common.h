@@ -2,6 +2,7 @@
 #ifndef __LINUX_IRQENTRYCOMMON_H
 #define __LINUX_IRQENTRYCOMMON_H
 
+#include <linux/build_bug.h>
 #include <linux/context_tracking.h>
 #include <linux/hrtimer_rearm.h>
 #include <linux/kmsan.h>
@@ -353,7 +354,26 @@ typedef struct irqentry_state {
 } irqentry_state_t;
 #endif
 
-irqentry_state_t noinstr irqentry_hardirq_enter(struct pt_regs *regs);
+irqentry_state_t noinstr __irqentry_hardirq_enter(struct pt_regs *regs);
+
+/**
+ * irqentry_hardirq_enter - Establish early ordinary-hardirq state
+ * @regs: Pointer to the interrupted register state
+ *
+ * This lifecycle splits preempt-count addition around instrumentable entry
+ * work. The split is valid only when the reschedule bit is stored separately
+ * from the preempt count.
+ *
+ * Returns: An opaque object for the matching irqentry exit operation.
+ */
+static __always_inline irqentry_state_t
+irqentry_hardirq_enter(struct pt_regs *regs)
+{
+	BUILD_BUG_ON_MSG(!IS_ENABLED(CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS),
+			 "pre-counted hardirq entry requires separate resched bits");
+
+	return __irqentry_hardirq_enter(regs);
+}
 
 /**
  * irqentry_hardirq_tail_enter - Restore ordinary-hardirq return-tail state
