@@ -353,7 +353,12 @@ typedef struct irqentry_state {
 } irqentry_state_t;
 #endif
 
+#ifdef CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS
 irqentry_state_t noinstr irqentry_hardirq_enter(struct pt_regs *regs);
+#else
+irqentry_state_t irqentry_hardirq_enter(struct pt_regs *regs)
+	__compiletime_error("pre-counted hardirq entry requires separate resched bits");
+#endif
 
 /**
  * irqentry_hardirq_tail_enter - Restore ordinary-hardirq return-tail state

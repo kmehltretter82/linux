@@ -6051,8 +6051,10 @@ static __always_inline void preempt_count_add_debug_checks(void)
  * preempt_count_add_finish - Finish a raw preempt count addition
  * @val: The value which was added to the preempt count
  *
- * Complete the debug checks and latency tracing after an entry path had to
- * update the raw preempt count before instrumentable code could run.
+ * Run post-add debug checks and latency tracing after an entry path had to
+ * update the raw preempt count before instrumentable code could run. This
+ * split requires CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS because it cannot
+ * reproduce the pre-add signed-underflow check used without separate bits.
  */
 void preempt_count_add_finish(int val)
 {

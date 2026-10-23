@@ -122,6 +122,7 @@ noinstr irqentry_state_t irqentry_enter(struct pt_regs *regs)
 	return irqentry_enter_from_kernel_mode(regs);
 }
 
+#ifdef CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS
 /**
  * irqentry_hardirq_enter - Establish state for ordinary hardirq entry
  * @regs: Pointer to the interrupted register state
@@ -151,6 +152,7 @@ noinstr irqentry_state_t irqentry_hardirq_enter(struct pt_regs *regs)
 
 	return __irqentry_enter_from_kernel_mode(regs, true);
 }
+#endif
 
 /**
  * arch_irqentry_exit_need_resched - Architecture specific need resched function
