@@ -6047,6 +6047,29 @@ static __always_inline void preempt_count_add_debug_checks(void)
 #endif
 }
 
+#if defined(CONFIG_DEBUG_PREEMPT) && \
+	!defined(CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS)
+/*
+ * Preserve DEBUG_LOCKS_WARN_ON() semantics without invoking instrumented
+ * reporting from noinstr entry code. The caller reaches this only after
+ * observing an already-negative count. Recheck after testing oops state to
+ * retain the original short-circuit order.
+ */
+struct preempt_count_add_state noinstr
+preempt_count_add_start_slow(int val)
+{
+	struct preempt_count_add_state state = { };
+
+	if (!oops_in_progress && !preempt_count_add_valid())
+		return state;
+
+	__preempt_count_add(val);
+	state.applied = true;
+	return state;
+}
+NOKPROBE_SYMBOL(preempt_count_add_start_slow);
+#endif
+
 /**
  * preempt_count_add_finish - Finish a raw preempt count addition
  * @val: The value which was added to the preempt count
@@ -6058,10 +6081,14 @@ static __always_inline void preempt_count_add_debug_checks(void)
  */
 void preempt_count_add_finish(int val, struct preempt_count_add_state state)
 {
-#ifdef CONFIG_DEBUG_PREEMPT
-	if (!IS_ENABLED(CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS) &&
-	    DEBUG_LOCKS_WARN_ON(!preempt_count_add_applied(state)))
+#if defined(CONFIG_DEBUG_PREEMPT) && \
+	!defined(CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS)
+	bool applied = preempt_count_add_applied(state);
+
+	if (!applied) {
+		DEBUG_LOCKS_WARN_ON(!applied);
 		return;
+	}
 #endif
 	preempt_count_add_debug_checks();
 	preempt_latency_start(val);
