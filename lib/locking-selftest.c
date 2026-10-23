@@ -1554,6 +1554,7 @@ static bool staged_add_oops_case(bool oops_at_start, bool oops_at_finish)
 	const unsigned long ip_sentinel = ~0UL;
 	struct preempt_count_add_state state;
 	unsigned long saved_disable_ip;
+	unsigned long irq_flags;
 	long saved_preempt_count;
 	int saved_oops;
 	int count_after_start;
@@ -1563,6 +1564,7 @@ static bool staged_add_oops_case(bool oops_at_start, bool oops_at_finish)
 	bool report_seen;
 	bool failed = false;
 
+	raw_local_irq_save(irq_flags);
 	saved_preempt_count = preempt_count();
 	saved_disable_ip = current->preempt_disable_ip;
 	saved_oops = READ_ONCE(oops_in_progress);
@@ -1602,13 +1604,34 @@ static bool staged_add_oops_case(bool oops_at_start, bool oops_at_finish)
 	WRITE_ONCE(oops_in_progress, saved_oops);
 	preempt_count_set(saved_preempt_count);
 	current->preempt_disable_ip = saved_disable_ip;
+	raw_local_irq_restore(irq_flags);
 	return failed;
 }
 
 static void staged_add_oops_test(void)
 {
+	long saved_preempt_count;
+	unsigned long irq_flags;
 	unsigned int start, finish;
 	bool saved_silent;
+
+	/* x86-32 masks its shared reschedule bit from preempt_count(). */
+	raw_local_irq_save(irq_flags);
+	if (READ_ONCE(oops_in_progress)) {
+		raw_local_irq_restore(irq_flags);
+		pr_info("%33s: skipped during oops |\n", "staged add oops");
+		return;
+	}
+	saved_preempt_count = preempt_count();
+	preempt_count_set(-256);
+	if (preempt_count() != -256) {
+		preempt_count_set(saved_preempt_count);
+		raw_local_irq_restore(irq_flags);
+		pr_info("%33s: skipped |\n", "staged add oops");
+		return;
+	}
+	preempt_count_set(saved_preempt_count);
+	raw_local_irq_restore(irq_flags);
 
 	saved_silent = debug_locks_silent;
 	for (start = 0; start < 2; start++) {
