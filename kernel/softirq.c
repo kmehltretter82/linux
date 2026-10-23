@@ -726,12 +726,14 @@ static __always_inline void irq_enter_rcu_common(void)
 }
 
 /**
- * irq_enter_rcu_preempt_counted - Enter hardirq with its count already set
+ * irq_enter_rcu_preempt_counted - Finish staged hardirq entry
  *
- * Complete an early staged hardirq preempt-count update, then establish the
+ * Finish an early staged hardirq preempt-count attempt, then establish the
  * remaining timer and accounting state. The matching lockdep hardirq state
- * was established by irqentry_hardirq_enter() before entry tracing. If the
- * pre-add debug check failed, report it here after entry became instrumentable.
+ * was established by irqentry_hardirq_enter() before entry tracing. An
+ * applied update receives post-add bookkeeping. A rejected update attempts
+ * deferred reporting and skips that bookkeeping even if reporting is
+ * suppressed.
  */
 void irq_enter_rcu_preempt_counted(struct preempt_count_add_state count_state)
 {
@@ -838,7 +840,8 @@ irq_exit_wake_late_softirqs(unsigned int wake_flags)
  * irqentry_hardirq_tail_exit - Close work and remove return-tail state
  *
  * Run every instrumentable teardown operation, including the final worker
- * closure, before removing the raw hardirq count and lockdep nesting.
+ * closure, before conditionally removing any applied raw hardirq count and
+ * ending lockdep nesting.
  */
 void noinstr
 irqentry_hardirq_tail_exit(struct preempt_count_add_state count_state)
@@ -865,7 +868,8 @@ static __always_inline unsigned int __irq_exit_rcu(bool keep_hardirq_count)
 	account_hardirq_exit(current);
 
 	/*
-	 * HARDIRQ_OFFSET is still set. Only the outermost interrupt handles
+	 * HARDIRQ_OFFSET normally remains set. A rejected staged addition leaves
+	 * an already-invalid count unchanged. Only the outermost interrupt handles
 	 * softirqs, and only if it did not hit a softirq or BH disabled section.
 	 */
 	if (irq_count() == HARDIRQ_OFFSET && local_softirq_pending()) {
@@ -895,10 +899,11 @@ static __always_inline unsigned int __irq_exit_rcu(bool keep_hardirq_count)
 /**
  * irq_exit_rcu_preempt_counted_prepare - Process IRQ exit and prepare teardown
  *
- * The caller attempted to establish hardirq state before instrumentable IRQ
- * entry. Keep an applied count through every traceable part of IRQ exit, then
- * prepare its raw teardown. The caller must apply the raw teardown immediately
- * after return. A failed pre-add state suppresses the matching subtraction.
+ * The caller staged a hardirq-count attempt and established lockdep state
+ * before instrumentable IRQ entry. Keep any applied count through every
+ * traceable part of IRQ exit, then prepare its raw teardown. The caller must
+ * apply the raw teardown immediately after return. A rejected staged-add
+ * state suppresses the matching subtraction.
  *
  * Return callbacks can raise regular or forced-thread timer softirqs after
  * __irq_exit_rcu() performed its final drain and worker wakeups. Recheck both

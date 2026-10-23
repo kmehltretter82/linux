@@ -217,29 +217,35 @@ tracing callbacks can use the pre-counted lifecycle. It applies only to an
 ordinary hard interrupt after the architecture has distinguished it from an
 NMI-like event:
 
-  * irqentry_hardirq_enter() adds HARDIRQ_OFFSET with a raw update and
-    establishes IRQ-disabled and lockdep hardirq state before instrumentable
-    entry work. It then runs the generic entry and context-tracking path,
-    including any required transition out of an RCU extended quiescent state.
+  * irqentry_hardirq_enter() attempts to add HARDIRQ_OFFSET with a raw update
+    and records whether the update was applied. It establishes IRQ-disabled
+    and lockdep hardirq state before instrumentable entry work. It then runs
+    the generic entry and context-tracking path, including any required
+    transition out of an RCU extended quiescent state.
 
-  * irq_enter_rcu_preempt_counted() later performs the traceable debug and
-    latency bookkeeping for that raw update. It also performs the deferred
-    timer repair, NOHZ tick handling and interrupt accounting from
-    irq_enter_rcu().
+  * irq_enter_rcu_preempt_counted() later finishes the staged attempt. For an
+    applied update it performs traceable debug and latency bookkeeping. For a
+    rejected update it attempts deferred reporting and skips post-add
+    bookkeeping. It also performs the deferred timer repair, NOHZ tick
+    handling and interrupt accounting from irq_enter_rcu().
 
   * irq_exit_rcu_preempt_counted_prepare() performs interrupt accounting,
-    softirq handling and NOHZ tick handling while retaining the hardirq count
-    and lockdep nesting through every traceable exit callback. Softirq
-    handling uses the same temporary HARDIRQ_OFFSET to SOFTIRQ_OFFSET and back
-    transition described above. The architecture immediately follows the
-    preparation with irqentry_hardirq_exit_finish(), which applies the raw
-    count and lockdep teardown.
+    softirq handling and NOHZ tick handling while retaining any applied
+    hardirq count and the lockdep nesting through every traceable exit
+    callback. When an applied outer hardirq invokes softirqs, handling uses the
+    same temporary HARDIRQ_OFFSET to SOFTIRQ_OFFSET and back transition
+    described above. The architecture immediately follows the preparation
+    with irqentry_hardirq_exit_finish(), which performs the conditional
+    raw-count subtraction and lockdep teardown.
 
-The raw addition carries an opaque state into its instrumentable finish and
-matching teardown. On configurations without separate reschedule bits, this
-preserves the signed pre-add debug check: an already-invalid negative count is
-not changed, and the warning is deferred until reporting is safe. The same
-state prevents a subtraction when the addition was not applied.
+The staged addition carries an opaque state into its instrumentable finish and
+matching teardown. With DEBUG_PREEMPT and no separate reschedule bits, an
+already-negative count follows the legacy DEBUG_LOCKS_WARN_ON() rule. During
+an oops the warning condition is bypassed and the addition is applied.
+Otherwise the attempt is rejected and leaves the count unchanged. Its finish
+attempts deferred reporting, which an intervening oops can suppress. A
+rejected token always skips post-add bookkeeping and the matching subtraction,
+independently of whether reporting produced a warning.
 
 The real interrupt is complete after that teardown. Return-to-kernel
 preemption can schedule and migrate the task before the architecture-specific
@@ -247,19 +253,19 @@ tail runs, so the current preemption count cannot identify the original entry
 class. irqentry_state_t retains that provenance instead.
 
 For an ordinary hardirq returning to kernel mode,
-irqentry_hardirq_tail_enter() restores only HARDIRQ_OFFSET and lockdep hardirq
-nesting after the preemption decision. This synthetic classification covers
-traceable architecture tail work, deferred timer rearming, IRQ-on preparation
-and context-tracking preparation. It does not repeat interrupt accounting,
-RCU or tick entry. IRQ-on preparation requires this synthetic lockdep nesting
-to remain present. An interrupted outer hardirq can contribute additional
-nesting.
+irqentry_hardirq_tail_enter() makes a fresh staged attempt to add
+HARDIRQ_OFFSET and establishes lockdep hardirq nesting after the preemption
+decision. This synthetic classification covers traceable architecture tail
+work, deferred timer rearming, IRQ-on preparation and context-tracking
+preparation. It does not repeat interrupt accounting, RCU or tick entry.
+IRQ-on preparation requires this synthetic lockdep nesting to remain present.
+An interrupted outer hardirq can contribute additional nesting.
 
 irqentry_hardirq_tail_exit() performs the final traceable teardown preparation
-and then removes the raw synthetic state. Both retained exit points recheck
-regular softirq work and forced-thread timer work raised by late callbacks and
-wake the corresponding workers before dropping hardirq state. If the
-interrupted context was in an RCU extended quiescent state,
+and then conditionally removes any applied raw synthetic count. Both retained
+exit points recheck regular softirq work and forced-thread timer work raised by
+late callbacks and wake the corresponding workers before ending hardirq state.
+If the interrupted context was in an RCU extended quiescent state,
 ct_irq_exit_prepare() runs before the raw tail teardown and
 ct_irq_exit_finish() completes the transition afterwards.
 

@@ -6050,10 +6050,10 @@ static __always_inline void preempt_count_add_debug_checks(void)
 #if defined(CONFIG_DEBUG_PREEMPT) && \
 	!defined(CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS)
 /*
- * Preserve DEBUG_LOCKS_WARN_ON() semantics without invoking instrumented
- * reporting from noinstr entry code. The caller reaches this only after
- * observing an already-negative count. Recheck after testing oops state to
- * retain the original short-circuit order.
+ * Preserve the DEBUG_LOCKS_WARN_ON() add-or-reject decision without invoking
+ * instrumented reporting from noinstr entry code. The caller reaches this
+ * only after observing an already-negative count. Recheck after testing oops
+ * state to retain the original short-circuit order.
  */
 struct preempt_count_add_state noinstr
 preempt_count_add_start_slow(int val)
@@ -6071,12 +6071,13 @@ NOKPROBE_SYMBOL(preempt_count_add_start_slow);
 #endif
 
 /**
- * preempt_count_add_finish - Finish a raw preempt count addition
- * @val: The value which was added to the preempt count
+ * preempt_count_add_finish - Finish a staged preempt-count addition
+ * @val: The value requested by the matching staged addition
  * @state: Result of the matching preempt_count_add_start()
  *
- * Report a pre-add failure, or complete the post-add debug checks and latency
- * tracing, after an entry path had to stage the update before instrumentable
+ * Attempt to report a rejected addition and skip its post-add work, or
+ * complete the post-add debug checks and latency tracing for an applied
+ * addition, after an entry path had to stage the update before instrumentable
  * code could run.
  */
 void preempt_count_add_finish(int val, struct preempt_count_add_state state)

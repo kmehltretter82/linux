@@ -334,9 +334,9 @@ static __always_inline void irqentry_exit_to_user_mode(struct pt_regs *regs)
  *            exit path has to invoke ct_irq_exit().
  * @lockdep: Used exclusively in the irqentry_nmi_*() calls; ensures that
  *           lockdep state is restored correctly on exit from nmi.
- * @hardirq: Records that irqentry_hardirq_enter() established this state for
- *           an ordinary hard interrupt.
- * @hardirq_count: State of the current staged hardirq count addition.
+ * @hardirq: Records ordinary-hardirq provenance from
+ *           irqentry_hardirq_enter().
+ * @hardirq_count: State of the current staged hardirq-count attempt.
  *
  * This opaque object is filled in by the irqentry_*_enter() functions and
  * must be passed back into the corresponding irqentry_*_exit() functions
@@ -365,12 +365,13 @@ irqentry_hardirq_count_state(irqentry_state_t state)
 }
 
 /**
- * irqentry_hardirq_tail_enter - Restore ordinary-hardirq return-tail state
+ * irqentry_hardirq_tail_enter - Stage ordinary-hardirq return-tail state
  * @state: Pointer to state returned by the matching irqentry_hardirq_enter()
  *
- * Restore only the hardirq classification which traceable return-tail work
- * needs. Accounting, RCU and tick handling belong to the completed interrupt
- * and must not be repeated here.
+ * Make a fresh staged hardirq-count attempt and establish the lockdep
+ * classification which traceable return-tail work needs. Accounting, RCU and
+ * tick handling belong to the completed interrupt and must not be repeated
+ * here.
  */
 static __always_inline void
 irqentry_hardirq_tail_enter(irqentry_state_t *state)

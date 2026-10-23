@@ -41,7 +41,8 @@ irqentry_hardirq_exit_prepare(struct preempt_count_add_state count_state)
 
 	/*
 	 * Preempt-on tracing can raise deferred work. The caller must perform
-	 * the final worker closure before removing the raw hardirq count.
+	 * the final worker closure before conditionally removing an applied
+	 * raw hardirq count.
 	 */
 	do_sub = preempt_count_add_applied(count_state) &&
 		 preempt_count_sub_prepare(HARDIRQ_OFFSET);

@@ -258,9 +258,11 @@ preempt_count_add_start_slow(int val);
 #endif
 
 /*
- * Apply the non-instrumentable part of a staged preempt-count addition. The
- * returned state must be passed to the matching preempt_count_add_finish()
- * and subtraction preparation. The finish reports a deferred debug failure.
+ * Attempt the non-instrumentable part of a staged preempt-count addition and
+ * record whether it was applied. The returned state must be passed to the
+ * matching preempt_count_add_finish() and subtraction preparation. A rejected
+ * state attempts deferred reporting and suppresses post-add bookkeeping and
+ * the matching subtraction regardless of warning suppression.
  */
 static __always_inline struct preempt_count_add_state
 preempt_count_add_start(int val)
