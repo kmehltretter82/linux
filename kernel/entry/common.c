@@ -136,12 +136,16 @@ noinstr irqentry_state_t irqentry_enter(struct pt_regs *regs)
  */
 noinstr irqentry_state_t irqentry_hardirq_enter(struct pt_regs *regs)
 {
-	__preempt_count_add(HARDIRQ_OFFSET);
+	struct preempt_count_add_state count_state;
+	irqentry_state_t ret;
+
+	count_state = preempt_count_add_start(HARDIRQ_OFFSET);
 
 	if (user_mode(regs)) {
-		irqentry_state_t ret = {
+		ret = (irqentry_state_t) {
 			.exit_rcu = false,
 			.hardirq = true,
+			.hardirq_count = count_state,
 		};
 
 		__enter_from_user_mode(regs, true);
@@ -149,7 +153,9 @@ noinstr irqentry_state_t irqentry_hardirq_enter(struct pt_regs *regs)
 		return ret;
 	}
 
-	return __irqentry_enter_from_kernel_mode(regs, true);
+	ret = __irqentry_enter_from_kernel_mode(regs, true);
+	ret.hardirq_count = count_state;
+	return ret;
 }
 
 /**

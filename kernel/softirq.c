@@ -728,13 +728,14 @@ static __always_inline void irq_enter_rcu_common(void)
 /**
  * irq_enter_rcu_preempt_counted - Enter hardirq with its count already set
  *
- * Complete an early raw hardirq preempt-count update, then establish the
+ * Complete an early staged hardirq preempt-count update, then establish the
  * remaining timer and accounting state. The matching lockdep hardirq state
- * was established by irqentry_hardirq_enter() before entry tracing.
+ * was established by irqentry_hardirq_enter() before entry tracing. If the
+ * pre-add debug check failed, report it here after entry became instrumentable.
  */
-void irq_enter_rcu_preempt_counted(void)
+void irq_enter_rcu_preempt_counted(struct preempt_count_add_state count_state)
 {
-	preempt_count_add_finish(HARDIRQ_OFFSET);
+	preempt_count_add_finish(HARDIRQ_OFFSET, count_state);
 	irq_enter_rcu_common();
 }
 
@@ -839,12 +840,13 @@ irq_exit_wake_late_softirqs(unsigned int wake_flags)
  * Run every instrumentable teardown operation, including the final worker
  * closure, before removing the raw hardirq count and lockdep nesting.
  */
-void noinstr irqentry_hardirq_tail_exit(void)
+void noinstr
+irqentry_hardirq_tail_exit(struct preempt_count_add_state count_state)
 {
 	bool do_sub;
 
 	instrumentation_begin();
-	do_sub = irqentry_hardirq_exit_prepare();
+	do_sub = irqentry_hardirq_exit_prepare(count_state);
 	irq_exit_wake_late_softirqs(0);
 	instrumentation_end();
 
@@ -893,9 +895,10 @@ static __always_inline unsigned int __irq_exit_rcu(bool keep_hardirq_count)
 /**
  * irq_exit_rcu_preempt_counted_prepare - Process IRQ exit and prepare teardown
  *
- * The caller established hardirq state before instrumentable IRQ entry. Keep
- * that state through every traceable part of IRQ exit, then prepare its raw
- * teardown. The caller must apply the raw teardown immediately after return.
+ * The caller attempted to establish hardirq state before instrumentable IRQ
+ * entry. Keep an applied count through every traceable part of IRQ exit, then
+ * prepare its raw teardown. The caller must apply the raw teardown immediately
+ * after return. A failed pre-add state suppresses the matching subtraction.
  *
  * Return callbacks can raise regular or forced-thread timer softirqs after
  * __irq_exit_rcu() performed its final drain and worker wakeups. Recheck both
@@ -905,14 +908,15 @@ static __always_inline unsigned int __irq_exit_rcu(bool keep_hardirq_count)
  * recorded by __irq_exit_rcu(); the worker cannot run on this CPU before
  * hardirq teardown.
  */
-bool noinstr irq_exit_rcu_preempt_counted_prepare(void)
+bool noinstr
+irq_exit_rcu_preempt_counted_prepare(struct preempt_count_add_state count_state)
 {
 	unsigned int wake_flags;
 	bool do_sub;
 
 	instrumentation_begin();
 	wake_flags = __irq_exit_rcu(true);
-	do_sub = irqentry_hardirq_exit_prepare();
+	do_sub = irqentry_hardirq_exit_prepare(count_state);
 	irq_exit_wake_late_softirqs(wake_flags);
 	instrumentation_end();
 

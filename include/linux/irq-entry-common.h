@@ -5,6 +5,7 @@
 #include <linux/context_tracking.h>
 #include <linux/hrtimer_rearm.h>
 #include <linux/kmsan.h>
+#include <linux/preempt.h>
 #include <linux/rseq_entry.h>
 #include <linux/static_call_types.h>
 #include <linux/syscalls.h>
@@ -335,6 +336,7 @@ static __always_inline void irqentry_exit_to_user_mode(struct pt_regs *regs)
  *           lockdep state is restored correctly on exit from nmi.
  * @hardirq: Records that irqentry_hardirq_enter() established this state for
  *           an ordinary hard interrupt.
+ * @hardirq_count: State of the current staged hardirq count addition.
  *
  * This opaque object is filled in by the irqentry_*_enter() functions and
  * must be passed back into the corresponding irqentry_*_exit() functions
@@ -350,31 +352,41 @@ typedef struct irqentry_state {
 		bool	lockdep;
 	};
 	bool		hardirq;
+	struct preempt_count_add_state hardirq_count;
 } irqentry_state_t;
 #endif
 
 irqentry_state_t noinstr irqentry_hardirq_enter(struct pt_regs *regs);
 
+static __always_inline struct preempt_count_add_state
+irqentry_hardirq_count_state(irqentry_state_t state)
+{
+	return state.hardirq_count;
+}
+
 /**
  * irqentry_hardirq_tail_enter - Restore ordinary-hardirq return-tail state
- * @state: Return value from the matching irqentry_hardirq_enter()
+ * @state: Pointer to state returned by the matching irqentry_hardirq_enter()
  *
  * Restore only the hardirq classification which traceable return-tail work
  * needs. Accounting, RCU and tick handling belong to the completed interrupt
  * and must not be repeated here.
  */
 static __always_inline void
-irqentry_hardirq_tail_enter(irqentry_state_t state)
+irqentry_hardirq_tail_enter(irqentry_state_t *state)
 {
-	if (!state.hardirq)
+	struct preempt_count_add_state count_state;
+
+	if (!state->hardirq)
 		return;
 
-	__preempt_count_add(HARDIRQ_OFFSET);
+	count_state = preempt_count_add_start(HARDIRQ_OFFSET);
 	lockdep_hardirq_enter();
 
 	instrumentation_begin();
-	preempt_count_add_finish(HARDIRQ_OFFSET);
+	preempt_count_add_finish(HARDIRQ_OFFSET, count_state);
 	instrumentation_end();
+	state->hardirq_count = count_state;
 }
 
 /**
@@ -555,7 +567,7 @@ irqentry_exit_to_kernel_mode_after_preempt(struct pt_regs *regs, irqentry_state_
 		if (state.exit_rcu)
 			ct_state = ct_irq_exit_prepare();
 
-		irqentry_hardirq_tail_exit();
+		irqentry_hardirq_tail_exit(state.hardirq_count);
 
 		if (state.exit_rcu)
 			ct_irq_exit_finish(ct_state);
@@ -622,7 +634,7 @@ static __always_inline void irqentry_exit_to_kernel_mode(struct pt_regs *regs,
 	irqentry_exit_to_kernel_mode_preempt(regs, state);
 	instrumentation_end();
 
-	irqentry_hardirq_tail_enter(state);
+	irqentry_hardirq_tail_enter(&state);
 	irqentry_exit_to_kernel_mode_after_preempt(regs, state);
 }
 

@@ -6050,12 +6050,19 @@ static __always_inline void preempt_count_add_debug_checks(void)
 /**
  * preempt_count_add_finish - Finish a raw preempt count addition
  * @val: The value which was added to the preempt count
+ * @state: Result of the matching preempt_count_add_start()
  *
- * Complete the debug checks and latency tracing after an entry path had to
- * update the raw preempt count before instrumentable code could run.
+ * Report a pre-add failure, or complete the post-add debug checks and latency
+ * tracing, after an entry path had to stage the update before instrumentable
+ * code could run.
  */
-void preempt_count_add_finish(int val)
+void preempt_count_add_finish(int val, struct preempt_count_add_state state)
 {
+#ifdef CONFIG_DEBUG_PREEMPT
+	if (!IS_ENABLED(CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS) &&
+	    DEBUG_LOCKS_WARN_ON(!preempt_count_add_applied(state)))
+		return;
+#endif
 	preempt_count_add_debug_checks();
 	preempt_latency_start(val);
 }
@@ -6071,8 +6078,7 @@ void preempt_count_add(int val)
 	 * if using HAS_SEPARATE_PREEMPT_RESCHED_BITS because preempt count takes all 32
 	 * bits.
 	 */
-	if (!IS_ENABLED(CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS) &&
-	    DEBUG_LOCKS_WARN_ON((preempt_count() < 0)))
+	if (DEBUG_LOCKS_WARN_ON(!preempt_count_add_valid()))
 		return;
 #endif
 	__preempt_count_add(val);

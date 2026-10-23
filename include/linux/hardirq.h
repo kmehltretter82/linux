@@ -25,16 +25,17 @@ static __always_inline void rcu_irq_enter_check_tick(void)
 		__rcu_irq_enter_check_tick();
 }
 
-void irq_enter_rcu_preempt_counted(void);
-bool irq_exit_rcu_preempt_counted_prepare(void);
-void noinstr irqentry_hardirq_tail_exit(void);
+void irq_enter_rcu_preempt_counted(struct preempt_count_add_state count_state);
+bool irq_exit_rcu_preempt_counted_prepare(struct preempt_count_add_state count_state);
+void noinstr irqentry_hardirq_tail_exit(struct preempt_count_add_state count_state);
 
 /*
  * Prepare every potentially instrumentable part of hardirq teardown before
  * the raw count and lockdep updates. The caller must invoke the matching
  * finish helper without passing through instrumentable code.
  */
-static __always_inline bool irqentry_hardirq_exit_prepare(void)
+static __always_inline bool
+irqentry_hardirq_exit_prepare(struct preempt_count_add_state count_state)
 {
 	bool do_sub;
 
@@ -42,7 +43,8 @@ static __always_inline bool irqentry_hardirq_exit_prepare(void)
 	 * Preempt-on tracing can raise deferred work. The caller must perform
 	 * the final worker closure before removing the raw hardirq count.
 	 */
-	do_sub = preempt_count_sub_prepare(HARDIRQ_OFFSET);
+	do_sub = preempt_count_add_applied(count_state) &&
+		 preempt_count_sub_prepare(HARDIRQ_OFFSET);
 	lockdep_hardirq_exit_prepare();
 	return do_sub;
 }

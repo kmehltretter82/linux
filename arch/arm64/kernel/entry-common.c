@@ -95,7 +95,7 @@ static void noinstr __arm64_exit_to_kernel_mode(struct pt_regs *regs,
 	local_daif_mask();
 	irqentry_exit_pcpu_adjust(regs);
 	/* arm64 uses the split exit API, so enter the tail before MTE tracing. */
-	irqentry_hardirq_tail_enter(state);
+	irqentry_hardirq_tail_enter(&state);
 	mte_check_tfsr_exit();
 	irqentry_exit_to_kernel_mode_after_preempt(regs, state);
 }
@@ -562,16 +562,18 @@ static __always_inline void __el1_pnmi(struct pt_regs *regs,
 static __always_inline void __el1_irq(struct pt_regs *regs,
 				      void (*handler)(struct pt_regs *))
 {
+	struct preempt_count_add_state count_state;
 	irqentry_state_t state;
 	bool do_sub;
 
 	state = irqentry_hardirq_enter(regs);
+	count_state = irqentry_hardirq_count_state(state);
 	mte_check_tfsr_entry();
 	mte_disable_tco_entry(current);
 
-	irq_enter_rcu_preempt_counted();
+	irq_enter_rcu_preempt_counted(count_state);
 	do_interrupt_handler(regs, handler);
-	do_sub = irq_exit_rcu_preempt_counted_prepare();
+	do_sub = irq_exit_rcu_preempt_counted_prepare(count_state);
 	irqentry_hardirq_exit_finish(do_sub);
 
 	arm64_exit_to_kernel_mode_preempt(regs, state);
@@ -883,9 +885,12 @@ asmlinkage void noinstr el0t_64_sync_handler(struct pt_regs *regs)
 static void noinstr el0_interrupt(struct pt_regs *regs,
 				  void (*handler)(struct pt_regs *))
 {
+	struct preempt_count_add_state count_state;
+	irqentry_state_t state;
 	bool do_sub;
 
-	(void)irqentry_hardirq_enter(regs);
+	state = irqentry_hardirq_enter(regs);
+	count_state = irqentry_hardirq_count_state(state);
 	mte_disable_tco_entry(current);
 	sme_enter_from_user_mode();
 
@@ -894,9 +899,9 @@ static void noinstr el0_interrupt(struct pt_regs *regs,
 	if (regs->pc & BIT(55))
 		arm64_apply_bp_hardening();
 
-	irq_enter_rcu_preempt_counted();
+	irq_enter_rcu_preempt_counted(count_state);
 	do_interrupt_handler(regs, handler);
-	do_sub = irq_exit_rcu_preempt_counted_prepare();
+	do_sub = irq_exit_rcu_preempt_counted_prepare(count_state);
 	irqentry_hardirq_exit_finish(do_sub);
 
 	arm64_exit_to_user_mode(regs);

@@ -217,6 +217,53 @@ static __always_inline unsigned char interrupt_context_level(void)
  */
 #define in_atomic_preempt_off() (preempt_count() != PREEMPT_DISABLE_OFFSET)
 
+struct preempt_count_add_state {
+	bool applied;
+};
+
+static __always_inline bool
+preempt_count_add_applied(struct preempt_count_add_state state)
+{
+	if (!IS_ENABLED(CONFIG_DEBUG_PREEMPT) ||
+	    IS_ENABLED(CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS))
+		return true;
+
+	return state.applied;
+}
+
+static __always_inline bool preempt_count_add_valid(void)
+{
+#ifdef CONFIG_DEBUG_PREEMPT
+	/*
+	 * On configurations without separate reschedule bits, preempt_count()
+	 * excludes any shared reschedule bit. A negative result therefore denotes
+	 * an existing underflow.
+	 */
+	if (!IS_ENABLED(CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS) &&
+	    preempt_count() < 0)
+		return false;
+#endif
+	return true;
+}
+
+/*
+ * Apply the non-instrumentable part of a staged preempt-count addition. The
+ * returned state must be passed to the matching preempt_count_add_finish()
+ * and subtraction preparation. The finish reports a deferred debug failure.
+ */
+static __always_inline struct preempt_count_add_state
+preempt_count_add_start(int val)
+{
+	struct preempt_count_add_state state = {
+		.applied = preempt_count_add_valid(),
+	};
+
+	if (state.applied)
+		__preempt_count_add(val);
+
+	return state;
+}
+
 #if defined(CONFIG_DEBUG_PREEMPT) || defined(CONFIG_TRACE_PREEMPT_TOGGLE)
 extern void preempt_count_add(int val);
 extern void preempt_count_sub(int val);
@@ -230,10 +277,11 @@ extern void preempt_count_sub(int val);
 
 #if defined(CONFIG_PREEMPTION) && (defined(CONFIG_DEBUG_PREEMPT) || \
 					defined(CONFIG_TRACE_PREEMPT_TOGGLE))
-void preempt_count_add_finish(int val);
+void preempt_count_add_finish(int val, struct preempt_count_add_state state);
 bool preempt_count_sub_prepare(int val);
 #else
-static __always_inline void preempt_count_add_finish(int val) { }
+static __always_inline void
+preempt_count_add_finish(int val, struct preempt_count_add_state state) { }
 static __always_inline bool preempt_count_sub_prepare(int val) { return true; }
 #endif
 

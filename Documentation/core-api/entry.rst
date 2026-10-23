@@ -235,6 +235,12 @@ NMI-like event:
     preparation with irqentry_hardirq_exit_finish(), which applies the raw
     count and lockdep teardown.
 
+The raw addition carries an opaque state into its instrumentable finish and
+matching teardown. On configurations without separate reschedule bits, this
+preserves the signed pre-add debug check: an already-invalid negative count is
+not changed, and the warning is deferred until reporting is safe. The same
+state prevents a subtraction when the addition was not applied.
+
 The real interrupt is complete after that teardown. Return-to-kernel
 preemption can schedule and migrate the task before the architecture-specific
 tail runs, so the current preemption count cannot identify the original entry
