@@ -598,10 +598,14 @@ static notrace int irq_exit_cross_wake(struct fprobe *fp,
 
 	if (!ctx || raw_smp_processor_id() != READ_ONCE(ctx->target_cpu) ||
 	    irq_count() != HARDIRQ_OFFSET || !irqs_disabled() ||
-	    !irq_exit_cross_retained_return(ctx, ret_ip) ||
 	    !ftrace_regs_has_args(fregs))
 		return 0;
 
+	/*
+	 * wakeup_softirqd() and wake_timersd() may be either inlined or
+	 * outlined. The exact task and one-shot phase sequence identify the two
+	 * closure wakes without depending on their wake_up_process() return IP.
+	 */
 	task = (struct task_struct *)ftrace_regs_get_argument(fregs, 0);
 	phase = atomic_read_acquire(&ctx->phase);
 
