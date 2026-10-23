@@ -230,13 +230,13 @@ NMI-like event:
     handling and interrupt accounting from irq_enter_rcu().
 
   * irq_exit_rcu_preempt_counted_prepare() performs interrupt accounting,
-    softirq handling and NOHZ tick handling while retaining any applied
-    hardirq count and the lockdep nesting through every traceable exit
-    callback. When an applied outer hardirq invokes softirqs, handling uses the
-    same temporary HARDIRQ_OFFSET to SOFTIRQ_OFFSET and back transition
-    described above. The architecture immediately follows the preparation
-    with irqentry_hardirq_exit_finish(), which performs the conditional
-    raw-count subtraction and lockdep teardown.
+    softirq handling and NOHZ tick handling while carrying any applied
+    hardirq count across the traceable exit path. When an applied outer
+    hardirq invokes softirqs, both the preempt-count and lockdep
+    classifications temporarily switch from hardirq to softirq and back. The
+    architecture immediately follows the preparation with
+    irqentry_hardirq_exit_finish(), which performs the conditional raw-count
+    subtraction and lockdep teardown.
 
 The staged addition carries an opaque state into its instrumentable finish and
 matching teardown. With DEBUG_PREEMPT and no separate reschedule bits, an
@@ -262,10 +262,11 @@ IRQ-on preparation requires this synthetic lockdep nesting to remain present.
 An interrupted outer hardirq can contribute additional nesting.
 
 irqentry_hardirq_tail_exit() performs the final traceable teardown preparation
-and then conditionally removes any applied raw synthetic count. Both retained
-exit points recheck regular softirq work and forced-thread timer work raised by
-late callbacks and wake the corresponding workers before ending hardirq state.
-If the interrupted context was in an RCU extended quiescent state,
+and then conditionally removes any applied raw synthetic count. For an applied
+staged count at outermost hardirq depth, both retained exit points recheck
+regular softirq work and forced-thread timer work raised by late callbacks and
+wake the corresponding workers before ending hardirq state. If the interrupted
+context was in an RCU extended quiescent state,
 ct_irq_exit_prepare() runs before the raw tail teardown and
 ct_irq_exit_finish() completes the transition afterwards.
 

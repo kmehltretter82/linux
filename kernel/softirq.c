@@ -900,10 +900,11 @@ static __always_inline unsigned int __irq_exit_rcu(bool keep_hardirq_count)
  * irq_exit_rcu_preempt_counted_prepare - Process IRQ exit and prepare teardown
  *
  * The caller staged a hardirq-count attempt and established lockdep state
- * before instrumentable IRQ entry. Keep any applied count through every
- * traceable part of IRQ exit, then prepare its raw teardown. The caller must
- * apply the raw teardown immediately after return. A rejected staged-add
- * state suppresses the matching subtraction.
+ * before instrumentable IRQ entry. Carry any applied count across traceable
+ * IRQ exit. Softirq handling temporarily replaces HARDIRQ_OFFSET with
+ * SOFTIRQ_OFFSET and restores it afterwards. The caller must invoke the raw
+ * teardown helper immediately after return. A rejected staged-add state makes
+ * that helper skip the matching subtraction.
  *
  * Return callbacks can raise regular or forced-thread timer softirqs after
  * __irq_exit_rcu() performed its final drain and worker wakeups. Recheck both

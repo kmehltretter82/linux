@@ -526,8 +526,9 @@ static inline void irqentry_exit_to_kernel_mode_preempt(struct pt_regs *regs,
  * The rearm on return to user mode needs no such annotation: no locks are
  * held there, so it uses the same lock chains as the rearm in hardirq
  * context. Ordinary-hardirq return paths do not use this wrapper: their saved
- * provenance restores both the hardirq count and lockdep nesting across the
- * whole traceable tail and they call hrtimer_rearm_deferred() directly.
+ * provenance makes a fresh hardirq-count attempt and establishes lockdep
+ * nesting across the whole traceable tail. They call
+ * hrtimer_rearm_deferred() directly.
  */
 static __always_inline void irqentry_hrtimer_rearm_deferred(void)
 {
