@@ -25,6 +25,7 @@
 #include <linux/irqflags.h>
 #include <linux/rtmutex.h>
 #include <linux/local_lock.h>
+#include <linux/printk.h>
 
 #ifdef CONFIG_PREEMPT_RT
 # define NON_RT(...)
@@ -1539,6 +1540,104 @@ static void dotest(void (*testcase_fn)(void), int expected, int lockclass_mask)
 	reset_locks();
 }
 
+#if defined(CONFIG_DEBUG_PREEMPT) && \
+	!defined(CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS)
+/*
+ * Exercise the staged-add decision without leaving the boot kernel with a
+ * corrupted count or disabled lock debugging.  The count at entry is already
+ * invalid, so use the locking selftest's existing save/reset discipline.
+ */
+static bool staged_add_oops_case(bool oops_at_start, bool oops_at_finish)
+{
+	const int invalid_count = -256;
+	const int hardirq_offset = HARDIRQ_OFFSET;
+	const unsigned long ip_sentinel = ~0UL;
+	struct preempt_count_add_state state;
+	unsigned long saved_disable_ip;
+	long saved_preempt_count;
+	int saved_oops;
+	int count_after_start;
+	bool expected_applied;
+	bool expected_report;
+	bool post_add_ran;
+	bool report_seen;
+	bool failed = false;
+
+	saved_preempt_count = preempt_count();
+	saved_disable_ip = current->preempt_disable_ip;
+	saved_oops = READ_ONCE(oops_in_progress);
+	expected_applied = oops_at_start;
+	expected_report = !oops_at_start && !oops_at_finish;
+
+	preempt_count_set(invalid_count);
+	WRITE_ONCE(oops_in_progress, oops_at_start);
+	state = preempt_count_add_start(hardirq_offset);
+	count_after_start = preempt_count();
+
+	failed |= preempt_count_add_applied(state) != expected_applied;
+	failed |= count_after_start != invalid_count +
+			(expected_applied ? hardirq_offset : 0);
+
+	/*
+	 * Make preempt_latency_start() observable if finish reaches post-add
+	 * bookkeeping.  A rejected token must return before changing the marker,
+	 * even when an oops suppresses its warning.
+	 */
+	preempt_count_set(hardirq_offset);
+	current->preempt_disable_ip = ip_sentinel;
+	WRITE_ONCE(oops_in_progress, oops_at_finish);
+	preempt_count_add_finish(hardirq_offset, state);
+	post_add_ran = current->preempt_disable_ip != ip_sentinel;
+	report_seen = !debug_locks;
+
+	failed |= post_add_ran != expected_applied;
+	failed |= report_seen != expected_report;
+
+	/* Model the matching token-gated raw teardown and verify net balance. */
+	preempt_count_set(count_after_start);
+	if (preempt_count_add_applied(state))
+		__preempt_count_sub(hardirq_offset);
+	failed |= preempt_count() != invalid_count;
+
+	WRITE_ONCE(oops_in_progress, saved_oops);
+	preempt_count_set(saved_preempt_count);
+	current->preempt_disable_ip = saved_disable_ip;
+	return failed;
+}
+
+static void staged_add_oops_test(void)
+{
+	unsigned int start, finish;
+	bool saved_silent;
+
+	saved_silent = debug_locks_silent;
+	for (start = 0; start < 2; start++) {
+		for (finish = 0; finish < 2; finish++) {
+			bool failed;
+
+			debug_locks_silent = true;
+			failed = staged_add_oops_case(start, finish);
+
+			pr_info("%33s: %u: %s |\n",
+				start ? "staged add oops/1x" :
+					"staged add oops/0x",
+				finish, failed ? "FAILED" : "  ok  ");
+			testcase_total++;
+			if (failed)
+				unexpected_testcase_failures++;
+			else
+				testcase_successes++;
+
+			/* A rejected finish intentionally disables debug_locks. */
+			reset_locks();
+		}
+	}
+	debug_locks_silent = saved_silent;
+}
+#else
+static inline void staged_add_oops_test(void) { }
+#endif
+
 #ifdef CONFIG_RT_MUTEXES
 #define dotest_rt(fn, e, m)	dotest((fn), (e), (m))
 #else
@@ -2987,6 +3086,7 @@ void locking_selftest(void)
 	DO_TESTCASE_1("IRQ tail prepare", prepare_irqtail, 1);
 	DO_TESTCASE_1("IRQ tail prepare", prepare_irqtail, 2);
 	DO_TESTCASE_1B("regular IRQ prepare", prepare_regular, 1);
+	staged_add_oops_test();
 
 	ww_tests();
 
