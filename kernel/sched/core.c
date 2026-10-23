@@ -6060,7 +6060,7 @@ preempt_count_add_start_slow(int val)
 {
 	struct preempt_count_add_state state = { };
 
-	if (!oops_in_progress && !preempt_count_add_valid())
+	if (!READ_ONCE(oops_in_progress) && !preempt_count_add_valid())
 		return state;
 
 	__preempt_count_add(val);
@@ -6105,7 +6105,8 @@ void preempt_count_add(int val)
 	 * if using HAS_SEPARATE_PREEMPT_RESCHED_BITS because preempt count takes all 32
 	 * bits.
 	 */
-	if (DEBUG_LOCKS_WARN_ON(!preempt_count_add_valid()))
+	if (!IS_ENABLED(CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS) &&
+	    DEBUG_LOCKS_WARN_ON((preempt_count() < 0)))
 		return;
 #endif
 	__preempt_count_add(val);
