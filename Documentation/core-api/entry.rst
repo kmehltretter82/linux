@@ -212,10 +212,12 @@ that HARDIRQ_OFFSET has been removed from the preemption count.
 Pre-counted hardirq lifecycle
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Architectures which need hardirq state before early context-tracking or
-tracing callbacks can use the pre-counted lifecycle. It applies only to an
-ordinary hard interrupt after the architecture has distinguished it from an
-NMI-like event:
+Architectures which select ``CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS`` and
+need hardirq state before early context-tracking or tracing callbacks can use
+the pre-counted lifecycle. Without separate reschedule bits,
+``preempt_count_add()`` performs a pre-add check which cannot be deferred
+until after the raw addition. The lifecycle applies only to an ordinary hard
+interrupt after the architecture has distinguished it from an NMI-like event:
 
   * irqentry_hardirq_enter() adds HARDIRQ_OFFSET with a raw update and
     establishes IRQ-disabled and lockdep hardirq state before instrumentable
