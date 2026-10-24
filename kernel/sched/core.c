@@ -6055,36 +6055,35 @@ static __always_inline void preempt_count_add_debug_checks(void)
  * only after observing an already-negative count. Recheck after testing oops
  * state to retain the original short-circuit order.
  */
-struct preempt_count_add_state noinstr
-preempt_count_add_start_slow(int val)
+struct irqentry_hardirq_cookie noinstr
+__irqentry_hardirq_count_start_slow(void)
 {
-	struct preempt_count_add_state state = { };
+	struct irqentry_hardirq_cookie cookie = { };
 
-	if (!READ_ONCE(oops_in_progress) && !preempt_count_add_valid())
-		return state;
+	if (!READ_ONCE(oops_in_progress) && !irqentry_hardirq_count_valid())
+		return cookie;
 
-	__preempt_count_add(val);
-	state.applied = true;
-	return state;
+	__preempt_count_add(HARDIRQ_OFFSET);
+	cookie.applied = true;
+	return cookie;
 }
-NOKPROBE_SYMBOL(preempt_count_add_start_slow);
+NOKPROBE_SYMBOL(__irqentry_hardirq_count_start_slow);
 #endif
 
 /**
- * preempt_count_add_finish - Finish a staged preempt-count addition
- * @val: The value requested by the matching staged addition
- * @state: Result of the matching preempt_count_add_start()
+ * irqentry_hardirq_count_finish - Finish a staged hardirq-count addition
+ * @cookie: Result of the matching irqentry_hardirq_count_start()
  *
  * Attempt to report a rejected addition and skip its post-add work, or
  * complete the post-add debug checks and latency tracing for an applied
  * addition, after an entry path had to stage the update before instrumentable
  * code could run.
  */
-void preempt_count_add_finish(int val, struct preempt_count_add_state state)
+void irqentry_hardirq_count_finish(struct irqentry_hardirq_cookie cookie)
 {
 #if defined(CONFIG_DEBUG_PREEMPT) && \
 	!defined(CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS)
-	bool applied = preempt_count_add_applied(state);
+	bool applied = irqentry_hardirq_count_applied(cookie);
 
 	if (!applied) {
 		DEBUG_LOCKS_WARN_ON(!applied);
@@ -6092,9 +6091,9 @@ void preempt_count_add_finish(int val, struct preempt_count_add_state state)
 	}
 #endif
 	preempt_count_add_debug_checks();
-	preempt_latency_start(val);
+	preempt_latency_start(HARDIRQ_OFFSET);
 }
-NOKPROBE_SYMBOL(preempt_count_add_finish);
+NOKPROBE_SYMBOL(irqentry_hardirq_count_finish);
 
 void preempt_count_add(int val)
 {
@@ -6150,23 +6149,22 @@ static __always_inline bool preempt_count_sub_debug_checks(int val)
 }
 
 /**
- * preempt_count_sub_prepare - Prepare a raw preempt count subtraction
- * @val: The value which will be subtracted from the preempt count
+ * irqentry_hardirq_count_sub_prepare - Prepare a raw hardirq-count subtraction
  *
  * Run debug checks and latency tracing before an entry path performs a raw
  * preempt count subtraction after all instrumentable code has returned.
  *
  * Return: true when the caller should perform the subtraction.
  */
-bool preempt_count_sub_prepare(int val)
+bool irqentry_hardirq_count_sub_prepare(void)
 {
-	if (!preempt_count_sub_debug_checks(val))
+	if (!preempt_count_sub_debug_checks(HARDIRQ_OFFSET))
 		return false;
 
-	preempt_latency_stop(val);
+	preempt_latency_stop(HARDIRQ_OFFSET);
 	return true;
 }
-NOKPROBE_SYMBOL(preempt_count_sub_prepare);
+NOKPROBE_SYMBOL(irqentry_hardirq_count_sub_prepare);
 
 void preempt_count_sub(int val)
 {

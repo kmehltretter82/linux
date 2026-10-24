@@ -137,17 +137,17 @@ noinstr irqentry_state_t irqentry_enter(struct pt_regs *regs)
  */
 noinstr irqentry_state_t irqentry_hardirq_enter(struct pt_regs *regs)
 {
-	struct preempt_count_add_state count_state;
+	struct irqentry_hardirq_cookie cookie;
 	irqentry_state_t ret;
 
-	count_state = preempt_count_add_start(HARDIRQ_OFFSET);
+	cookie = irqentry_hardirq_count_start();
 
 	if (user_mode(regs)) {
 		ret = (irqentry_state_t) {
 			.exit_rcu = false,
 			.hardirq = IRQENTRY_HARDIRQ_APPLIED,
 		};
-		irqentry_hardirq_count_state_set(&ret, count_state);
+		irqentry_hardirq_count_state_set(&ret, cookie);
 
 		__enter_from_user_mode(regs, true);
 		rseq_note_user_irq_entry();
@@ -155,7 +155,7 @@ noinstr irqentry_state_t irqentry_hardirq_enter(struct pt_regs *regs)
 	}
 
 	ret = __irqentry_enter_from_kernel_mode(regs, true);
-	irqentry_hardirq_count_state_set(&ret, count_state);
+	irqentry_hardirq_count_state_set(&ret, cookie);
 	return ret;
 }
 

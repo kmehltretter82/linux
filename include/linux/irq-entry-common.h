@@ -6,6 +6,7 @@
 #include <linux/hrtimer_rearm.h>
 #include <linux/kmsan.h>
 #include <linux/preempt.h>
+#include <linux/irqentry_hardirq.h>
 #include <linux/rseq_entry.h>
 #include <linux/static_call_types.h>
 #include <linux/syscalls.h>
@@ -362,23 +363,23 @@ typedef struct irqentry_state {
 
 irqentry_state_t noinstr irqentry_hardirq_enter(struct pt_regs *regs);
 
-static __always_inline struct preempt_count_add_state
+static __always_inline struct irqentry_hardirq_cookie
 irqentry_hardirq_count_state(irqentry_state_t state)
 {
-	struct preempt_count_add_state count_state = { };
+	struct irqentry_hardirq_cookie cookie = { };
 
 #if defined(CONFIG_DEBUG_PREEMPT) && \
 	!defined(CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS)
-	count_state.applied = state.hardirq == IRQENTRY_HARDIRQ_APPLIED;
+	cookie.applied = state.hardirq == IRQENTRY_HARDIRQ_APPLIED;
 #endif
-	return count_state;
+	return cookie;
 }
 
 static __always_inline void
 irqentry_hardirq_count_state_set(irqentry_state_t *state,
-				 struct preempt_count_add_state count_state)
+				 struct irqentry_hardirq_cookie cookie)
 {
-	state->hardirq = preempt_count_add_applied(count_state) ?
+	state->hardirq = irqentry_hardirq_count_applied(cookie) ?
 		IRQENTRY_HARDIRQ_APPLIED : IRQENTRY_HARDIRQ_REJECTED;
 }
 
@@ -394,18 +395,18 @@ irqentry_hardirq_count_state_set(irqentry_state_t *state,
 static __always_inline void
 irqentry_hardirq_tail_enter(irqentry_state_t *state)
 {
-	struct preempt_count_add_state count_state;
+	struct irqentry_hardirq_cookie cookie;
 
 	if (!state->hardirq)
 		return;
 
-	count_state = preempt_count_add_start(HARDIRQ_OFFSET);
+	cookie = irqentry_hardirq_count_start();
 	lockdep_hardirq_enter();
 
 	instrumentation_begin();
-	preempt_count_add_finish(HARDIRQ_OFFSET, count_state);
+	irqentry_hardirq_count_finish(cookie);
 	instrumentation_end();
-	irqentry_hardirq_count_state_set(state, count_state);
+	irqentry_hardirq_count_state_set(state, cookie);
 }
 
 /**
