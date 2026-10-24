@@ -199,8 +199,9 @@ __visible noinstr void func(struct pt_regs *regs, unsigned long error_code)
  * to the function as error_code argument which needs to be truncated
  * to an u8 because the push is sign extending.
  *
- * irq_enter/exit_rcu() are invoked before the function body and the
- * KVM L1D flush request is set. Stack switching to the interrupt stack
+ * Raw hardirq and lockdep state is established before traceable entry work.
+ * The remaining irq_enter/exit_rcu() work runs around the function body and
+ * the KVM L1D flush request is set. Stack switching to the interrupt stack
  * has to be done in the function body if necessary.
  */
 #define DEFINE_IDTENTRY_IRQ(func)					\
@@ -209,12 +210,15 @@ static void __##func(struct pt_regs *regs, u32 vector);			\
 __visible noinstr void func(struct pt_regs *regs,			\
 			    unsigned long error_code)			\
 {									\
-	irqentry_state_t state = irqentry_enter(regs);			\
+	irqentry_state_t state = irqentry_hardirq_enter(regs);		\
+	struct irqentry_hardirq_cookie cookie =				\
+		irqentry_hardirq_count_state(state);			\
 	u32 vector = (u32)(u8)error_code;				\
 									\
 	kvm_set_cpu_l1tf_flush_l1d();                                   \
 	instrumentation_begin();					\
-	run_irq_on_irqstack_cond(__##func, regs, vector);		\
+	run_irq_on_irqstack_cond_preempt_counted(__##func, regs,	\
+						 vector, cookie);	\
 	instrumentation_end();						\
 	irqentry_exit(regs, state);					\
 }									\
@@ -240,33 +244,46 @@ static noinline void __##func(struct pt_regs *regs, u32 vector)
  * DEFINE_IDTENTRY_SYSVEC - Emit code for system vector IDT entry points
  * @func:	Function name of the entry point
  *
- * irqentry_enter/exit() and irq_enter/exit_rcu() are invoked before the
- * function body. KVM L1D flush request is set.
+ * Raw hardirq and lockdep state is established before traceable entry work.
+ * The remaining irq_enter/exit_rcu() work runs around the function body.
+ * KVM L1D flush request is set.
  *
  * Runs the function on the interrupt stack if the entry hit kernel mode
  */
 #define DEFINE_IDTENTRY_SYSVEC(func)					\
 static void __##func(struct pt_regs *regs);				\
 									\
-static __always_inline void instr_##func(struct pt_regs *regs)		\
+static __always_inline void						\
+instr_##func(struct pt_regs *regs,					\
+	     struct irqentry_hardirq_cookie cookie)			\
 {									\
-	run_sysvec_on_irqstack_cond(__##func, regs);			\
+	run_sysvec_on_irqstack_cond_preempt_counted(__##func, regs,	\
+						    cookie);		\
 }									\
 									\
 __visible noinstr void func(struct pt_regs *regs)			\
 {									\
-	irqentry_state_t state = irqentry_enter(regs);			\
+	irqentry_state_t state = irqentry_hardirq_enter(regs);		\
+	struct irqentry_hardirq_cookie cookie =				\
+		irqentry_hardirq_count_state(state);			\
 									\
 	kvm_set_cpu_l1tf_flush_l1d();                                   \
 	instrumentation_begin();					\
-	instr_##func (regs);						\
+	instr_##func(regs, cookie);					\
 	instrumentation_end();						\
 	irqentry_exit(regs, state);					\
 }									\
 									\
-void fred_##func(struct pt_regs *regs)					\
+noinstr void fred_##func(struct pt_regs *regs)				\
 {									\
-	instr_##func (regs);						\
+	irqentry_state_t state = irqentry_hardirq_enter(regs);		\
+	struct irqentry_hardirq_cookie cookie =				\
+		irqentry_hardirq_count_state(state);			\
+									\
+	instrumentation_begin();					\
+	instr_##func(regs, cookie);					\
+	instrumentation_end();						\
+	irqentry_exit(regs, state);					\
 }									\
 									\
 static noinline void __##func(struct pt_regs *regs)
@@ -277,7 +294,7 @@ static noinline void __##func(struct pt_regs *regs)
  * @func:	Function name of the entry point
  *
  * Runs the function on the interrupted stack. No switch to IRQ stack and
- * only the minimal __irq_enter/exit() handling.
+ * only minimal pre-counted hardirq handling.
  *
  * Only use for 'empty' vectors like reschedule IPI and KVM posted
  * interrupt vectors.
@@ -285,27 +302,38 @@ static noinline void __##func(struct pt_regs *regs)
 #define DEFINE_IDTENTRY_SYSVEC_SIMPLE(func)				\
 static __always_inline void __##func(struct pt_regs *regs);		\
 									\
-static __always_inline void instr_##func(struct pt_regs *regs)		\
+static __always_inline void						\
+instr_##func(struct pt_regs *regs,					\
+	     struct irqentry_hardirq_cookie cookie)			\
 {									\
-	__irq_enter_raw();						\
+	irqentry_hardirq_count_finish(cookie);				\
 	__##func (regs);						\
-	__irq_exit_raw();						\
+	irqentry_hardirq_tail_exit(cookie);				\
 }									\
 									\
 __visible noinstr void func(struct pt_regs *regs)			\
 {									\
-	irqentry_state_t state = irqentry_enter(regs);			\
+	irqentry_state_t state = irqentry_hardirq_enter(regs);		\
+	struct irqentry_hardirq_cookie cookie =				\
+		irqentry_hardirq_count_state(state);			\
 									\
 	kvm_set_cpu_l1tf_flush_l1d();                                   \
 	instrumentation_begin();					\
-	instr_##func (regs);						\
+	instr_##func(regs, cookie);					\
 	instrumentation_end();						\
 	irqentry_exit(regs, state);					\
 }									\
 									\
-void fred_##func(struct pt_regs *regs)					\
+noinstr void fred_##func(struct pt_regs *regs)				\
 {									\
-	instr_##func (regs);						\
+	irqentry_state_t state = irqentry_hardirq_enter(regs);		\
+	struct irqentry_hardirq_cookie cookie =				\
+		irqentry_hardirq_count_state(state);			\
+									\
+	instrumentation_begin();					\
+	instr_##func(regs, cookie);					\
+	instrumentation_end();						\
+	irqentry_exit(regs, state);					\
 }									\
 									\
 static __always_inline void __##func(struct pt_regs *regs)

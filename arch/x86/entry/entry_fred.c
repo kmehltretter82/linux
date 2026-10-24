@@ -174,13 +174,10 @@ static noinstr void fred_extint(struct pt_regs *regs)
 		return;
 
 	if (likely(vector >= FIRST_SYSTEM_VECTOR)) {
-		irqentry_state_t state = irqentry_enter(regs);
-
 		instrumentation_begin();
 		sysvec_table[array_index_nospec(vector - FIRST_SYSTEM_VECTOR,
 						NR_SYSTEM_VECTORS)](regs);
 		instrumentation_end();
-		irqentry_exit(regs, state);
 	} else {
 		common_interrupt(regs, vector);
 	}

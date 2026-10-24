@@ -131,6 +131,7 @@ noinstr irqentry_state_t irqentry_enter(struct pt_regs *regs)
  * hardirq lockdep state before context tracking or irqflag tracing can invoke
  * callbacks. The caller must have distinguished an ordinary hardirq from
  * NMI-like entry and must finish the staged attempt with
+ * irqentry_hardirq_count_finish(), directly or through
  * irq_enter_rcu_preempt_counted().
  *
  * Returns: An opaque object for the matching irqentry exit operation.

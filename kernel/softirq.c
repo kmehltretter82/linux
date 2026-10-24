@@ -838,7 +838,7 @@ irq_exit_wake_late_softirqs(unsigned int wake_flags)
 }
 
 /**
- * irqentry_hardirq_tail_exit - Close work and remove return-tail state
+ * irqentry_hardirq_tail_exit - Close work and remove raw hardirq state
  * @cookie: Staged hardirq-count cookie from irqentry_hardirq_tail_enter()
  *
  * Run every instrumentable teardown operation, including the final worker
