@@ -300,6 +300,131 @@ entry/exit events used by ``sts``.
      - no
      - yes
 
+KUnit scheduling coverage
+-------------------------
+
+``RV_MONITORS_KUNIT_TEST`` can be built in or as a module. The generated
+state-table and adapter cases run in either form. Tests which invoke
+non-exported generic IRQ entry/exit helpers or attach to non-exported boundary
+tracepoints require the built-in suite. A module build reports the standalone
+cases as skipped.
+
+``rv_test_irqstate_shared_actions`` emits two distinct IRQ action pairs for
+one IRQ number inside a single real ``irq_enter_rcu()``/``irq_exit_rcu()``
+boundary. Independent probes, filtered by the exact action pointers, require
+the first action to return ``IRQ_NONE`` and the second ``IRQ_HANDLED`` in the
+same order used by generic shared-IRQ dispatch. They also check hardirq and
+interrupt state, task and CPU identity, event counts, and count restoration.
+The monitor must accept the surrounding context without treating either
+action as another hardirq boundary. The test emits the action tracepoints
+directly; it does not construct an IRQ descriptor or invoke action handlers.
+
+``rv_test_irqstate_depth`` constructs every representable hardirq nesting
+level with the raw accounting helpers, then unwinds the complete stack. It
+checks the actual deepest component and restoration of the original count.
+An unmatched exit after the valid cycle must fail, so ignoring every event
+cannot satisfy the test. This is maximum valid nesting, not live counter
+overflow or physical interrupt-stack recursion.
+
+``rv_test_irqstate_depth_overflow`` fills the hardirq component to its maximum
+and then supplies the adapter with the depth value that another increment
+would wrap to. It requires exactly one reaction, no additional reaction while
+the valid stack is unwound, an unchanged NMI component, and exact restoration
+of the original preempt count. The test deliberately does not execute the
+overflowing raw increment, because that would carry into the adjacent NMI
+component. It tests rejection of wrapped boundary metadata, not live counter
+overflow.
+
+``rv_test_irqstate_sync`` resets and enables the bare adapter inside single
+and nested hardirq contexts, inside a real serving-softirq callback, and
+inside a hardirq interrupting that callback. Valid unwinding must establish
+idle without a reaction. On non-RT, it also enables between hardirq entry
+and inline softirq processing. The provenance-marked softirq pair must
+remain unsynchronized until the final hardirq exit establishes idle. A
+separate unmatched exit must then react exactly once. The softirq cases
+snapshot reactions before the invalid control, so an error on the valid
+sequence cannot replace the expected later error. These are adapter
+synchronization tests, not concurrent tracefs writes.
+
+``rv_test_irqstate_irq_exit_inline`` schedules a tasklet inside a real generic
+hardirq boundary and requires non-RT ``irq_exit_rcu()`` to process it before
+returning. Independent probes require hardirq entry, softirq entry, softirq
+exit, and final hardirq exit in that order. Both softirq events must report
+hardirq provenance. The entry callback raises a high-priority tasklet and
+requires it to run in the same interval, so entry-created work cannot be lost
+by the initial pending-bit clear. The exit callback raises another tasklet and
+requires the late ksoftirqd handoff. If the kernel diverts the original
+tasklet to ksoftirqd, for example under forced IRQ threading, the test drains
+it and skips because that configuration does not provide the inline path.
+
+``rv_test_irqstate_hardirq_exit_handoff`` raises a tasklet from the final
+hardirq-exit event. It requires the pending bit to remain set and ksoftirqd to
+be runnable before interrupts are restored. The corresponding forced-thread
+timer test raises timer work at the same event. The ktimerd wakeup callback
+then raises a tasklet. Both workers must be runnable before interrupts are
+restored, which checks the finite ksoftirqd, ktimerd, ksoftirqd closure. The
+test skips when forced IRQ threading is unavailable.
+
+``rv_test_irqstate_tick_exit_handoff`` runs on a full-NOHZ CPU and forces a
+``tick_stop`` event from the real IRQ-exit tick path. Its callback raises a
+tasklet after normal softirq processing. The test requires the final hardirq
+boundary to make ksoftirqd runnable before interrupts are restored. It skips
+when no full-NOHZ CPU is online.
+
+``rv_test_irqstate_rt_inline_bh`` forces a pending tasklet through the
+PREEMPT_RT ``local_bh_enable()`` inline-processing path. It requires the
+tasklet to finish synchronously in the enabling task, on the same CPU, while
+serving-softirq state is set and local interrupts are enabled. Independent
+boundary probes require exactly one entry before the callback and one exit
+afterward, both with local interrupts disabled and live serving state set;
+both must report no hardirq provenance. The monitor must accept the pair and
+the original counts must be restored.
+
+``rv_test_irqstate_rt_empty_worker`` uses a KUnit-only seam around the same
+PREEMPT_RT worker entry and exit helpers, without calling
+``handle_softirqs()``. It requires exactly one accepted context pair and no
+``softirq_entry`` or ``softirq_exit`` action from the synthetic owner between
+those boundaries. Both events must report no hardirq provenance. The seam
+wakes ksoftirqd while interrupts are disabled so
+pending work which races with the test remains scheduled. This
+deterministically covers the owner's no-handler interval; it does not invoke
+the smpboot predicate or prove that the current task is the real ksoftirqd
+thread.
+
+``rv_test_irqstate_rt_smpboot_empty_worker`` complements that unit seam. A
+KUnit-only flag makes the real ``ksoftirqd_should_run()`` predicate return true
+once when no work is pending. The smpboot loop then invokes
+``run_ksoftirqd()`` in the real per-CPU ksoftirqd task. The test requires the
+same empty boundary pair and accepts samples only while that forced invocation
+is active. This exercises the real predicate-to-worker path and pending-zero
+decision; it does not claim to reproduce the naturally raced pending-bit
+interleaving.
+
+Both empty-worker tests require a built-in RV KUnit suite. A modular suite
+reports them as skipped because the IRQ boundary tracepoints they attach to
+are not exported.
+
+With built-in RV KUnit tests, ``rv_test_irqexit_live`` enters the real
+``preempt_schedule_irq()`` helper with and without a task switch on one CPU.
+``rv_test_irqexit_migrate`` instead wakes a same-CPU FIFO worker which moves
+the switched-out owner to a different allowed online CPU. The test requires
+accepted entry and suspension on the source CPU and resumption and return
+on the destination. It also samples the CPU on which the helper actually
+returned, independently of the RV observer, and checks restoration of the
+owner's original affinity before the tested task exits.
+
+The two live helper cases use single-element parameter fixtures. Monitor
+slot allocation and destruction, and CPU-hotplug read locking, run in the
+suite runner, which owns the RV interface mutex. The case body and its
+cleanup can run in different KUnit threads. The tests retain a task
+reference until the observer and worker are stopped; the migration case
+checks restoration of the tested task's affinity before that task exits.
+
+The migration case skips when fewer than two allowed CPUs are online, or
+when the tests are modules: the helper is not exported. These tests exercise
+the real helper and scheduler, but invoke the helper directly. They are not
+evidence of an architecture's physical interrupt-return assembly path.
+
 Coverage limits
 ---------------
 

@@ -9,10 +9,13 @@
 #include <linux/kthread.h>
 #include <linux/rv.h>
 #include <linux/sched.h>
+#include <linux/tick.h>
 #include <linux/wait.h>
 #include <rv/kunit.h>
 #include <rv_trace.h>
 #include <trace/events/irq.h>
+#include <trace/events/sched.h>
+#include <trace/events/timer.h>
 
 #include "irqstate_kunit.h"
 
@@ -512,6 +515,44 @@ static void rv_test_irqstate(struct kunit *test)
 	local_irq_restore(flags);
 	RV_KUNIT_EXPECT_OBSERVED(test, ctx, reactions[0], 0);
 
+	/* PREEMPT_RT never serves softirqs from irq_exit(). */
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT)) {
+		/* Softirq processing replaces and then restores hardirq state. */
+		local_irq_save(flags);
+		__irq_enter_raw();
+		rv_irqstate_ops.handle_hardirq_entry(NULL, 1);
+		__preempt_count_sub(HARDIRQ_OFFSET - SOFTIRQ_OFFSET);
+		rv_irqstate_ops.handle_softirq_entry(NULL, true, true);
+		__irq_enter_raw();
+		rv_irqstate_ops.handle_hardirq_entry(NULL, 1);
+		rv_irqstate_ops.handle_hardirq_exit(NULL, 1);
+		__irq_exit_raw();
+		rv_irqstate_ops.handle_softirq_exit(NULL, true, true);
+		__preempt_count_add(HARDIRQ_OFFSET - SOFTIRQ_OFFSET);
+		rv_irqstate_ops.handle_hardirq_exit(NULL, 1);
+		reactions[0] = READ_ONCE(ctx->reactions);
+		__irq_exit_raw();
+		local_irq_restore(flags);
+		RV_KUNIT_EXPECT_OBSERVED(test, ctx, reactions[0], 0);
+
+		/* Provenance selects the transition which returns to hardirq. */
+		local_irq_save(flags);
+		__irq_enter_raw();
+		rv_irqstate_ops.handle_hardirq_entry(NULL, 1);
+		__preempt_count_sub(HARDIRQ_OFFSET - SOFTIRQ_OFFSET);
+		reactions[0] = READ_ONCE(ctx->reactions);
+		rv_irqstate_ops.handle_softirq_entry(NULL, true, false);
+		reactions[1] = READ_ONCE(ctx->reactions);
+		__preempt_count_add(HARDIRQ_OFFSET - SOFTIRQ_OFFSET);
+		rv_irqstate_ops.handle_hardirq_exit(NULL, 1);
+		reactions[2] = READ_ONCE(ctx->reactions);
+		__irq_exit_raw();
+		local_irq_restore(flags);
+		RV_KUNIT_EXPECT_OBSERVED(test, ctx, reactions[0], 0);
+		RV_KUNIT_EXPECT_OBSERVED(test, ctx, reactions[1], 1);
+		RV_KUNIT_EXPECT_OBSERVED(test, ctx, reactions[2], 0);
+	}
+
 	/* A second outer entry is not a nested interrupt. */
 	local_irq_save(flags);
 	__irq_enter_raw();
@@ -830,6 +871,32 @@ static void rv_test_irqstate_sync(struct kunit *test)
 		RV_KUNIT_EXPECT_OBSERVED(test, ctx, reactions[2], 1);
 	}
 
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT)) {
+		/* A mid-hardirq attach ignores softirq and syncs at H-exit. */
+		local_irq_save(flags);
+		mon->enabled = 0;
+		__irq_enter_raw();
+		rv_irqstate_ops.handle_hardirq_entry(NULL, 1);
+		mon->reset();
+		mon->enabled = 1;
+		__preempt_count_sub(HARDIRQ_OFFSET - SOFTIRQ_OFFSET);
+		rv_irqstate_ops.handle_softirq_entry(NULL, true, true);
+		rv_irqstate_ops.handle_softirq_exit(NULL, true, true);
+		__preempt_count_add(HARDIRQ_OFFSET - SOFTIRQ_OFFSET);
+		rv_irqstate_ops.handle_hardirq_exit(NULL, 1);
+		__irq_exit_raw();
+		reactions[0] = READ_ONCE(ctx->reactions);
+		__irq_enter_raw();
+		reactions[1] = READ_ONCE(ctx->reactions);
+		rv_irqstate_ops.handle_hardirq_exit(NULL, 1);
+		reactions[2] = READ_ONCE(ctx->reactions);
+		__irq_exit_raw();
+		local_irq_restore(flags);
+		RV_KUNIT_EXPECT_OBSERVED(test, ctx, reactions[0], 0);
+		RV_KUNIT_EXPECT_OBSERVED(test, ctx, reactions[1], 0);
+		RV_KUNIT_EXPECT_OBSERVED(test, ctx, reactions[2], 1);
+	}
+
 	expected = ctx->expected;
 	completed = run_irqstate_softirq_case(IRQSTATE_SOFTIRQ_SYNC, &rx_at_sync);
 	KUNIT_EXPECT_TRUE(test, completed);
@@ -861,20 +928,33 @@ struct irqstate_preempt_ctx {
 
 struct irqstate_inline_bh_ctx {
 	struct tasklet_struct tasklet;
+	struct tasklet_struct entry_tasklet;
 	struct tasklet_struct exit_tasklet;
 	struct task_struct *owner;
 	struct task_struct *softirqd;
 	int owner_cpu;
 	unsigned int entries;
 	unsigned int exits;
+	unsigned int hardirq_entries;
+	unsigned int hardirq_exits;
+	unsigned int event_index;
 	unsigned int tasklet_runs;
+	unsigned int nested_hardirq_runs;
+	unsigned int entry_tasklet_runs;
 	unsigned int exit_tasklet_runs;
 	bool armed;
+	bool raise_on_entry;
 	bool raise_on_exit;
+	bool inject_nested_hardirq;
+	bool expected_from_hardirq;
+	bool entry_from_hardirq;
+	bool exit_from_hardirq;
 	bool exit_tasklet_pending;
 	bool softirqd_already_runnable;
 	bool bad_boundary_context;
 	bool bad_boundary_cpu;
+	bool bad_provenance;
+	bool bad_order;
 	bool tasklet_serving;
 	bool tasklet_same_task;
 	bool tasklet_same_cpu;
@@ -883,6 +963,8 @@ struct irqstate_inline_bh_ctx {
 	bool tasklet_bracketed;
 	bool entry_attached;
 	bool exit_attached;
+	bool hardirq_entry_attached;
+	bool hardirq_exit_attached;
 };
 
 struct irqstate_empty_worker_ctx {
@@ -906,6 +988,44 @@ struct irqstate_empty_worker_ctx {
 	bool action_exit_attached;
 };
 
+struct irqstate_hardirq_exit_ctx {
+	struct tasklet_struct tasklet;
+	struct task_struct *owner;
+	struct task_struct *softirqd;
+	int owner_cpu;
+	bool armed;
+	bool callback_seen;
+	bool tasklet_pending;
+	bool softirqd_already_runnable;
+	bool bad_context;
+	bool attached;
+};
+
+#ifdef CONFIG_NO_HZ_FULL
+struct irqstate_tick_exit_ctx {
+	struct kunit *test;
+	struct tasklet_struct tasklet;
+	struct task_struct *owner;
+	struct task_struct *softirqd;
+	cpumask_t saved_mask;
+	unsigned int tick_dep_before;
+	unsigned int tick_dep_after;
+	int owner_cpu;
+	int tick_success;
+	int tick_dependency;
+	bool armed;
+	bool callback_seen;
+	bool tasklet_pending;
+	bool softirqd_already_runnable;
+	bool bad_context;
+	bool tick_attached;
+	bool tick_dep_added;
+	bool tick_dep_sampled;
+	bool affinity_changed;
+	bool hotplug_disabled;
+};
+#endif
+
 static bool irqstate_empty_worker_matches(struct irqstate_empty_worker_ctx *empty_ctx)
 {
 	/* Pairs with owner publication in both empty-worker test paths. */
@@ -916,6 +1036,39 @@ static bool irqstate_empty_worker_matches(struct irqstate_empty_worker_ctx *empt
 	return !empty_ctx->real_worker || softirq_kunit_empty_worker_active();
 }
 
+static void irqstate_inline_hardirq_entry(void *data, unsigned int depth)
+{
+	struct irqstate_inline_bh_ctx *inline_ctx = data;
+
+	/* Inline softirq processing enables IRQs; ignore a nested real IRQ. */
+	if (!READ_ONCE(inline_ctx->armed) || current != inline_ctx->owner ||
+	    in_serving_softirq() || depth != 1)
+		return;
+	inline_ctx->hardirq_entries++;
+	if (inline_ctx->event_index != 0)
+		inline_ctx->bad_order = true;
+	inline_ctx->event_index++;
+	if (hardirq_count() != HARDIRQ_OFFSET || in_serving_softirq() ||
+	    !irqs_disabled())
+		inline_ctx->bad_boundary_context = true;
+}
+
+static void irqstate_inline_hardirq_exit(void *data, unsigned int depth)
+{
+	struct irqstate_inline_bh_ctx *inline_ctx = data;
+
+	if (!READ_ONCE(inline_ctx->armed) || current != inline_ctx->owner ||
+	    in_serving_softirq() || depth != 1)
+		return;
+	inline_ctx->hardirq_exits++;
+	if (inline_ctx->event_index != 3)
+		inline_ctx->bad_order = true;
+	inline_ctx->event_index++;
+	if (hardirq_count() != HARDIRQ_OFFSET || in_serving_softirq() ||
+	    !irqs_disabled())
+		inline_ctx->bad_boundary_context = true;
+}
+
 static void irqstate_inline_bh_entry(void *data, bool serving,
 				     bool from_hardirq)
 {
@@ -924,10 +1077,21 @@ static void irqstate_inline_bh_entry(void *data, bool serving,
 	if (!READ_ONCE(inline_ctx->armed) || current != inline_ctx->owner)
 		return;
 	inline_ctx->entries++;
+	if (inline_ctx->event_index !=
+	    (inline_ctx->expected_from_hardirq ? 1 : 0))
+		inline_ctx->bad_order = true;
+	inline_ctx->event_index++;
+	inline_ctx->entry_from_hardirq = from_hardirq;
 	if (!serving || !in_serving_softirq() || !irqs_disabled())
 		inline_ctx->bad_boundary_context = true;
+	if (from_hardirq != inline_ctx->expected_from_hardirq)
+		inline_ctx->bad_provenance = true;
 	if (raw_smp_processor_id() != inline_ctx->owner_cpu)
 		inline_ctx->bad_boundary_cpu = true;
+	if (READ_ONCE(inline_ctx->raise_on_entry)) {
+		WRITE_ONCE(inline_ctx->raise_on_entry, false);
+		tasklet_hi_schedule(&inline_ctx->entry_tasklet);
+	}
 }
 
 static void irqstate_inline_bh_exit(void *data, bool serving,
@@ -938,8 +1102,15 @@ static void irqstate_inline_bh_exit(void *data, bool serving,
 	if (!READ_ONCE(inline_ctx->armed) || current != inline_ctx->owner)
 		return;
 	inline_ctx->exits++;
+	if (inline_ctx->event_index !=
+	    (inline_ctx->expected_from_hardirq ? 2 : 1))
+		inline_ctx->bad_order = true;
+	inline_ctx->event_index++;
+	inline_ctx->exit_from_hardirq = from_hardirq;
 	if (!serving || !in_serving_softirq() || !irqs_disabled())
 		inline_ctx->bad_boundary_context = true;
+	if (from_hardirq != inline_ctx->expected_from_hardirq)
+		inline_ctx->bad_provenance = true;
 	if (raw_smp_processor_id() != inline_ctx->owner_cpu)
 		inline_ctx->bad_boundary_cpu = true;
 	if (READ_ONCE(inline_ctx->raise_on_exit)) {
@@ -951,6 +1122,7 @@ static void irqstate_inline_bh_exit(void *data, bool serving,
 static void irqstate_inline_bh_tasklet(struct tasklet_struct *tasklet)
 {
 	struct irqstate_inline_bh_ctx *inline_ctx;
+	unsigned long flags;
 
 	inline_ctx = from_tasklet(inline_ctx, tasklet, tasklet);
 	inline_ctx->tasklet_runs++;
@@ -962,6 +1134,13 @@ static void irqstate_inline_bh_tasklet(struct tasklet_struct *tasklet)
 	inline_ctx->tasklet_in_hardirq = !!in_hardirq();
 	inline_ctx->tasklet_bracketed = inline_ctx->entries == 1 &&
 					 inline_ctx->exits == 0;
+	if (inline_ctx->inject_nested_hardirq) {
+		local_irq_save(flags);
+		irq_enter_rcu();
+		irq_exit_rcu();
+		local_irq_restore(flags);
+		inline_ctx->nested_hardirq_runs++;
+	}
 }
 
 static void irqstate_inline_bh_exit_tasklet(struct tasklet_struct *tasklet)
@@ -970,6 +1149,14 @@ static void irqstate_inline_bh_exit_tasklet(struct tasklet_struct *tasklet)
 
 	inline_ctx = from_tasklet(inline_ctx, tasklet, exit_tasklet);
 	inline_ctx->exit_tasklet_runs++;
+}
+
+static void irqstate_inline_bh_entry_tasklet(struct tasklet_struct *tasklet)
+{
+	struct irqstate_inline_bh_ctx *inline_ctx;
+
+	inline_ctx = from_tasklet(inline_ctx, tasklet, entry_tasklet);
+	inline_ctx->entry_tasklet_runs++;
 }
 
 static void irqstate_inline_bh_kill(void *data)
@@ -984,6 +1171,7 @@ static void irqstate_inline_bh_kill_all(void *data)
 	struct irqstate_inline_bh_ctx *inline_ctx = data;
 
 	tasklet_kill(&inline_ctx->tasklet);
+	tasklet_kill(&inline_ctx->entry_tasklet);
 	tasklet_kill(&inline_ctx->exit_tasklet);
 }
 
@@ -992,12 +1180,456 @@ static void irqstate_inline_bh_detach(void *data)
 	struct irqstate_inline_bh_ctx *inline_ctx = data;
 
 	WRITE_ONCE(inline_ctx->armed, false);
+	if (inline_ctx->hardirq_exit_attached)
+		unregister_trace_hardirq_context_exit_tp(
+			irqstate_inline_hardirq_exit, inline_ctx);
+	if (inline_ctx->hardirq_entry_attached)
+		unregister_trace_hardirq_context_entry_tp(
+			irqstate_inline_hardirq_entry, inline_ctx);
 	if (inline_ctx->entry_attached)
 		unregister_trace_softirq_context_entry_tp(irqstate_inline_bh_entry, inline_ctx);
 	if (inline_ctx->exit_attached)
 		unregister_trace_softirq_context_exit_tp(irqstate_inline_bh_exit, inline_ctx);
 	tracepoint_synchronize_unregister();
 }
+
+static void irqstate_hardirq_exit_tasklet(struct tasklet_struct *tasklet)
+{
+	(void)tasklet;
+}
+
+static void irqstate_hardirq_exit_raise(void *data, unsigned int depth)
+{
+	struct irqstate_hardirq_exit_ctx *exit_ctx = data;
+
+	if (!READ_ONCE(exit_ctx->armed) || current != exit_ctx->owner)
+		return;
+	exit_ctx->callback_seen = true;
+	if (depth != 1 || hardirq_count() != HARDIRQ_OFFSET ||
+	    in_serving_softirq() || !irqs_disabled() ||
+	    raw_smp_processor_id() != exit_ctx->owner_cpu)
+		exit_ctx->bad_context = true;
+	tasklet_schedule(&exit_ctx->tasklet);
+}
+
+static void irqstate_hardirq_exit_cleanup(void *data)
+{
+	struct irqstate_hardirq_exit_ctx *exit_ctx = data;
+
+	WRITE_ONCE(exit_ctx->armed, false);
+	if (exit_ctx->attached)
+		unregister_trace_hardirq_context_exit_tp(
+			irqstate_hardirq_exit_raise, exit_ctx);
+	tracepoint_synchronize_unregister();
+	tasklet_kill(&exit_ctx->tasklet);
+}
+
+#ifdef CONFIG_NO_HZ_FULL
+static void irqstate_tick_exit_tasklet(struct tasklet_struct *tasklet)
+{
+	(void)tasklet;
+}
+
+static void irqstate_tick_exit_raise(void *data, int success, int dependency)
+{
+	struct irqstate_tick_exit_ctx *tick_ctx = data;
+
+	if (!READ_ONCE(tick_ctx->armed) ||
+	    current != READ_ONCE(tick_ctx->owner) ||
+	    READ_ONCE(tick_ctx->callback_seen))
+		return;
+
+	WRITE_ONCE(tick_ctx->callback_seen, true);
+	tick_ctx->tick_success = success;
+	tick_ctx->tick_dependency = dependency;
+	if (success || !dependency ||
+	    hardirq_count() != HARDIRQ_OFFSET ||
+	    irq_count() != HARDIRQ_OFFSET || in_serving_softirq() ||
+	    !irqs_disabled() ||
+	    raw_smp_processor_id() != tick_ctx->owner_cpu)
+		tick_ctx->bad_context = true;
+	tasklet_schedule(&tick_ctx->tasklet);
+}
+
+static void irqstate_tick_exit_restore_dep(struct irqstate_tick_exit_ctx *tick_ctx)
+{
+	if (tick_ctx->tick_dep_added) {
+		tick_dep_clear_task(tick_ctx->owner, TICK_DEP_BIT_POSIX_TIMER);
+		tick_ctx->tick_dep_added = false;
+	}
+	if (!tick_ctx->tick_dep_sampled) {
+		tick_ctx->tick_dep_after =
+			atomic_read(&tick_ctx->owner->tick_dep_mask);
+		tick_ctx->tick_dep_sampled = true;
+	}
+}
+
+static void irqstate_tick_exit_cleanup(void *data)
+{
+	struct irqstate_tick_exit_ctx *tick_ctx = data;
+	int ret;
+
+	WRITE_ONCE(tick_ctx->armed, false);
+	if (tick_ctx->tick_attached)
+		unregister_trace_tick_stop(irqstate_tick_exit_raise, tick_ctx);
+	tracepoint_synchronize_unregister();
+	irqstate_tick_exit_restore_dep(tick_ctx);
+	tasklet_kill(&tick_ctx->tasklet);
+	if (tick_ctx->affinity_changed &&
+	    !(READ_ONCE(tick_ctx->owner->flags) & PF_EXITING)) {
+		ret = set_cpus_allowed_ptr(tick_ctx->owner,
+					   &tick_ctx->saved_mask);
+		KUNIT_EXPECT_EQ(tick_ctx->test, ret, 0);
+		if (!ret)
+			tick_ctx->affinity_changed = false;
+	}
+	if (tick_ctx->hotplug_disabled) {
+		cpu_hotplug_enable();
+		tick_ctx->hotplug_disabled = false;
+	}
+	put_task_struct(tick_ctx->owner);
+	tick_ctx->owner = NULL;
+}
+#endif
+
+/* Work first raised at the final hardirq boundary must reach ksoftirqd. */
+static void rv_test_irqstate_hardirq_exit_handoff(struct kunit *test)
+{
+	struct irqstate_hardirq_exit_ctx *exit_ctx;
+	struct rv_kunit_ctx *ctx = test->priv;
+	const char *skip_reason = NULL;
+	unsigned long flags;
+	int ret;
+
+	prepare_test(test, &rv_irqstate_ops.mon);
+	exit_ctx = kunit_kzalloc(test, sizeof(*exit_ctx), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, exit_ctx);
+	tasklet_setup(&exit_ctx->tasklet, irqstate_hardirq_exit_tasklet);
+	ret = register_trace_hardirq_context_exit_tp(
+		irqstate_hardirq_exit_raise, exit_ctx);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	exit_ctx->attached = true;
+	KUNIT_ASSERT_EQ(test, 0,
+			kunit_add_action_or_reset(test,
+						  irqstate_hardirq_exit_cleanup,
+						  exit_ctx));
+	attach_irqstate_test_probes();
+	KUNIT_ASSERT_EQ(test, 0,
+			kunit_add_action_or_reset(test, detach_irqstate_test_probes,
+						  NULL));
+
+	migrate_disable();
+	exit_ctx->owner = current;
+	exit_ctx->owner_cpu = raw_smp_processor_id();
+	exit_ctx->softirqd = this_cpu_ksoftirqd();
+	if (!exit_ctx->softirqd || local_softirq_pending() ||
+	    softirq_kunit_local_bh_blocked() ||
+	    !wait_task_inactive(exit_ctx->softirqd, TASK_INTERRUPTIBLE)) {
+		skip_reason = "Requires an idle local ksoftirqd";
+		goto out_enable_migration;
+	}
+
+	local_irq_save(flags);
+	if (local_softirq_pending() || softirq_kunit_local_bh_blocked() ||
+	    task_is_running(exit_ctx->softirqd)) {
+		local_irq_restore(flags);
+		skip_reason = "Local ksoftirqd stopped being idle";
+		goto out_enable_migration;
+	}
+	WRITE_ONCE(exit_ctx->armed, true);
+	irq_enter_rcu();
+	irq_exit_rcu();
+	exit_ctx->tasklet_pending =
+		!!(local_softirq_pending() & BIT(TASKLET_SOFTIRQ));
+	exit_ctx->softirqd_already_runnable =
+		!wake_up_process(exit_ctx->softirqd);
+	WRITE_ONCE(exit_ctx->armed, false);
+	local_irq_restore(flags);
+
+out_enable_migration:
+	migrate_enable();
+	if (skip_reason) {
+		kunit_skip(test, "%s", skip_reason);
+		return;
+	}
+
+	kunit_release_action(test, irqstate_hardirq_exit_cleanup, exit_ctx);
+	KUNIT_EXPECT_TRUE(test, exit_ctx->callback_seen);
+	KUNIT_EXPECT_TRUE(test, exit_ctx->tasklet_pending);
+	KUNIT_EXPECT_TRUE(test, exit_ctx->softirqd_already_runnable);
+	KUNIT_EXPECT_FALSE(test, exit_ctx->bad_context);
+	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
+}
+
+#ifdef CONFIG_NO_HZ_FULL
+/* Tick-exit instrumentation must run before the final hardirq handoff. */
+static void rv_test_irqstate_tick_exit_handoff(struct kunit *test)
+{
+	struct irqstate_tick_exit_ctx *tick_ctx;
+	struct rv_kunit_ctx *ctx = test->priv;
+	const char *skip_reason = NULL;
+	unsigned long flags;
+	unsigned int cpu;
+	int ret;
+
+	prepare_test(test, &rv_irqstate_ops.mon);
+	tick_ctx = kunit_kzalloc(test, sizeof(*tick_ctx), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tick_ctx);
+	tick_ctx->test = test;
+	tick_ctx->owner = current;
+	get_task_struct(tick_ctx->owner);
+	tasklet_setup(&tick_ctx->tasklet, irqstate_tick_exit_tasklet);
+	KUNIT_ASSERT_EQ(test, 0,
+			kunit_add_action_or_reset(test,
+						  irqstate_tick_exit_cleanup,
+						  tick_ctx));
+	ret = register_trace_tick_stop(irqstate_tick_exit_raise, tick_ctx);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	tick_ctx->tick_attached = true;
+	attach_irqstate_test_probes();
+	KUNIT_ASSERT_EQ(test, 0,
+			kunit_add_action_or_reset(test, detach_irqstate_test_probes,
+						  NULL));
+
+	cpu_hotplug_disable();
+	tick_ctx->hotplug_disabled = true;
+	for_each_online_cpu(cpu) {
+		if (tick_nohz_full_cpu(cpu))
+			break;
+	}
+	if (cpu >= nr_cpu_ids) {
+		skip_reason = "Requires an online full-NOHZ CPU";
+		goto out;
+	}
+
+	cpumask_copy(&tick_ctx->saved_mask, current->cpus_ptr);
+	ret = set_cpus_allowed_ptr(current, cpumask_of(cpu));
+	if (ret) {
+		skip_reason = "Could not run on a full-NOHZ CPU";
+		goto out;
+	}
+	tick_ctx->affinity_changed = true;
+	if (raw_smp_processor_id() != cpu) {
+		skip_reason = "Did not migrate to the full-NOHZ CPU";
+		goto out;
+	}
+
+	tick_ctx->owner_cpu = cpu;
+	tick_ctx->softirqd = per_cpu(ksoftirqd, cpu);
+	if (!tick_ctx->softirqd ||
+	    !wait_task_inactive(tick_ctx->softirqd, TASK_INTERRUPTIBLE)) {
+		skip_reason = "Requires an idle local ksoftirqd";
+		goto out;
+	}
+
+	local_irq_save(flags);
+	if (local_softirq_pending() || softirq_kunit_local_bh_blocked() ||
+	    task_is_running(tick_ctx->softirqd)) {
+		skip_reason = "Local ksoftirqd stopped being idle";
+		goto out_restore_irqs;
+	}
+
+	tick_ctx->tick_dep_before = atomic_read(&current->tick_dep_mask);
+	if (!(tick_ctx->tick_dep_before & TICK_DEP_MASK_POSIX_TIMER)) {
+		tick_dep_set_task(current, TICK_DEP_BIT_POSIX_TIMER);
+		tick_ctx->tick_dep_added = true;
+	}
+	WRITE_ONCE(tick_ctx->armed, true);
+	irq_enter_rcu();
+	irq_exit_rcu();
+	WRITE_ONCE(tick_ctx->armed, false);
+	irqstate_tick_exit_restore_dep(tick_ctx);
+	tick_ctx->tasklet_pending =
+		!!(local_softirq_pending() & BIT(TASKLET_SOFTIRQ));
+	/* A zero return proves that the final handoff already woke the worker. */
+	tick_ctx->softirqd_already_runnable =
+		!wake_up_process(tick_ctx->softirqd);
+
+out_restore_irqs:
+	local_irq_restore(flags);
+out:
+	if (skip_reason) {
+		kunit_mark_skipped(test, "%s", skip_reason);
+		return;
+	}
+
+	kunit_release_action(test, irqstate_tick_exit_cleanup, tick_ctx);
+	KUNIT_EXPECT_TRUE(test, tick_ctx->callback_seen);
+	KUNIT_EXPECT_EQ(test, tick_ctx->tick_success, 0);
+	KUNIT_EXPECT_NE(test, tick_ctx->tick_dependency, 0);
+	KUNIT_EXPECT_EQ(test, tick_ctx->tick_dep_after,
+			tick_ctx->tick_dep_before);
+	KUNIT_EXPECT_TRUE(test, tick_ctx->tasklet_pending);
+	KUNIT_EXPECT_TRUE(test, tick_ctx->softirqd_already_runnable);
+	KUNIT_EXPECT_FALSE(test, tick_ctx->bad_context);
+	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
+}
+#else
+static void rv_test_irqstate_tick_exit_handoff(struct kunit *test)
+{
+	kunit_skip(test, "Requires full NO_HZ support");
+}
+#endif
+
+#ifdef CONFIG_IRQ_FORCED_THREADING
+struct irqstate_timer_exit_ctx {
+	struct tasklet_struct tasklet;
+	struct task_struct *owner;
+	struct task_struct *softirqd;
+	struct task_struct *timersd;
+	int owner_cpu;
+	bool armed;
+	bool callback_seen;
+	bool timer_wakeup_seen;
+	bool timer_pending;
+	bool tasklet_pending;
+	bool softirqd_already_runnable;
+	bool timersd_already_runnable;
+	bool bad_context;
+	bool hardirq_exit_attached;
+	bool sched_waking_attached;
+};
+
+static void irqstate_timer_exit_tasklet(struct tasklet_struct *tasklet)
+{
+	(void)tasklet;
+}
+
+static void irqstate_timer_exit_raise(void *data, unsigned int depth)
+{
+	struct irqstate_timer_exit_ctx *timer_ctx = data;
+
+	if (!READ_ONCE(timer_ctx->armed) || current != timer_ctx->owner)
+		return;
+	timer_ctx->callback_seen = true;
+	if (depth != 1 || hardirq_count() != HARDIRQ_OFFSET ||
+	    in_serving_softirq() || !irqs_disabled() ||
+	    raw_smp_processor_id() != timer_ctx->owner_cpu)
+		timer_ctx->bad_context = true;
+	raise_ktimers_thread(TIMER_SOFTIRQ);
+}
+
+static void irqstate_timer_sched_waking(void *data, struct task_struct *task)
+{
+	struct irqstate_timer_exit_ctx *timer_ctx = data;
+
+	if (!READ_ONCE(timer_ctx->armed) || task != timer_ctx->timersd)
+		return;
+	timer_ctx->timer_wakeup_seen = true;
+	if (current != timer_ctx->owner || !irqs_disabled() ||
+	    raw_smp_processor_id() != timer_ctx->owner_cpu)
+		timer_ctx->bad_context = true;
+	tasklet_schedule(&timer_ctx->tasklet);
+}
+
+static void irqstate_timer_exit_detach(void *data)
+{
+	struct irqstate_timer_exit_ctx *timer_ctx = data;
+
+	WRITE_ONCE(timer_ctx->armed, false);
+	if (timer_ctx->sched_waking_attached)
+		unregister_trace_sched_waking(irqstate_timer_sched_waking,
+					      timer_ctx);
+	if (timer_ctx->hardirq_exit_attached)
+		unregister_trace_hardirq_context_exit_tp(
+			irqstate_timer_exit_raise, timer_ctx);
+	tracepoint_synchronize_unregister();
+	tasklet_kill(&timer_ctx->tasklet);
+}
+
+/* Late timer-wakeup work must reach ktimerd and then ksoftirqd. */
+static void rv_test_irqstate_hardirq_exit_timer_handoff(struct kunit *test)
+{
+	struct irqstate_timer_exit_ctx *timer_ctx;
+	struct rv_kunit_ctx *ctx = test->priv;
+	const char *skip_reason = NULL;
+	unsigned long flags;
+	int ret;
+
+	if (!force_irqthreads()) {
+		kunit_skip(test, "Requires forced IRQ threading");
+		return;
+	}
+
+	prepare_test(test, &rv_irqstate_ops.mon);
+	timer_ctx = kunit_kzalloc(test, sizeof(*timer_ctx), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, timer_ctx);
+	tasklet_setup(&timer_ctx->tasklet, irqstate_timer_exit_tasklet);
+	ret = register_trace_hardirq_context_exit_tp(
+		irqstate_timer_exit_raise, timer_ctx);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	timer_ctx->hardirq_exit_attached = true;
+	KUNIT_ASSERT_EQ(test, 0,
+			kunit_add_action_or_reset(test, irqstate_timer_exit_detach,
+						  timer_ctx));
+	ret = register_trace_sched_waking(irqstate_timer_sched_waking, timer_ctx);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	timer_ctx->sched_waking_attached = true;
+	attach_irqstate_test_probes();
+	KUNIT_ASSERT_EQ(test, 0,
+			kunit_add_action_or_reset(test, detach_irqstate_test_probes,
+						  NULL));
+
+	migrate_disable();
+	timer_ctx->owner = current;
+	timer_ctx->owner_cpu = raw_smp_processor_id();
+	timer_ctx->softirqd = this_cpu_ksoftirqd();
+	timer_ctx->timersd = this_cpu_read(ktimerd);
+	if (!timer_ctx->softirqd || !timer_ctx->timersd ||
+	    local_softirq_pending() || local_timers_pending_force_th() ||
+	    softirq_kunit_local_bh_blocked() ||
+	    !wait_task_inactive(timer_ctx->softirqd, TASK_INTERRUPTIBLE) ||
+	    !wait_task_inactive(timer_ctx->timersd, TASK_INTERRUPTIBLE)) {
+		skip_reason = "Requires idle local softirq workers";
+		goto out_enable_migration;
+	}
+
+	local_irq_save(flags);
+	if (local_softirq_pending() || local_timers_pending_force_th() ||
+	    softirq_kunit_local_bh_blocked() ||
+	    task_is_running(timer_ctx->softirqd) ||
+	    task_is_running(timer_ctx->timersd)) {
+		local_irq_restore(flags);
+		skip_reason = "Local softirq worker stopped being idle";
+		goto out_enable_migration;
+	}
+	WRITE_ONCE(timer_ctx->armed, true);
+	irq_enter_rcu();
+	irq_exit_rcu();
+	timer_ctx->timer_pending =
+		!!(local_timers_pending_force_th() & BIT(TIMER_SOFTIRQ));
+	timer_ctx->tasklet_pending =
+		!!(local_softirq_pending() & BIT(TASKLET_SOFTIRQ));
+	timer_ctx->timersd_already_runnable =
+		!wake_up_process(timer_ctx->timersd);
+	timer_ctx->softirqd_already_runnable =
+		!wake_up_process(timer_ctx->softirqd);
+	WRITE_ONCE(timer_ctx->armed, false);
+	local_irq_restore(flags);
+
+out_enable_migration:
+	migrate_enable();
+	if (skip_reason) {
+		kunit_skip(test, "%s", skip_reason);
+		return;
+	}
+
+	kunit_release_action(test, irqstate_timer_exit_detach, timer_ctx);
+	KUNIT_EXPECT_TRUE(test, timer_ctx->callback_seen);
+	KUNIT_EXPECT_TRUE(test, timer_ctx->timer_wakeup_seen);
+	KUNIT_EXPECT_TRUE(test, timer_ctx->timer_pending);
+	KUNIT_EXPECT_TRUE(test, timer_ctx->tasklet_pending);
+	KUNIT_EXPECT_TRUE(test, timer_ctx->timersd_already_runnable);
+	KUNIT_EXPECT_TRUE(test, timer_ctx->softirqd_already_runnable);
+	KUNIT_EXPECT_FALSE(test, timer_ctx->bad_context);
+	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
+}
+#else
+static void rv_test_irqstate_hardirq_exit_timer_handoff(struct kunit *test)
+{
+	kunit_skip(test, "Requires forced IRQ threading");
+}
+#endif
 
 /* Exercise non-RT inline softirq processing from a real hardirq exit. */
 static void rv_test_irqstate_irq_exit_inline(struct kunit *test)
@@ -1018,8 +1650,12 @@ static void rv_test_irqstate_irq_exit_inline(struct kunit *test)
 	inline_ctx = kunit_kzalloc(test, sizeof(*inline_ctx), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, inline_ctx);
 	tasklet_setup(&inline_ctx->tasklet, irqstate_inline_bh_tasklet);
+	tasklet_setup(&inline_ctx->entry_tasklet,
+		      irqstate_inline_bh_entry_tasklet);
 	tasklet_setup(&inline_ctx->exit_tasklet,
 		      irqstate_inline_bh_exit_tasklet);
+	inline_ctx->expected_from_hardirq = true;
+	inline_ctx->inject_nested_hardirq = true;
 	KUNIT_ASSERT_EQ(test, 0,
 			kunit_add_action_or_reset(test, irqstate_inline_bh_kill_all,
 						  inline_ctx));
@@ -1031,6 +1667,14 @@ static void rv_test_irqstate_irq_exit_inline(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, 0,
 			kunit_add_action_or_reset(test, irqstate_inline_bh_detach,
 						  inline_ctx));
+	ret = register_trace_hardirq_context_entry_tp(
+		irqstate_inline_hardirq_entry, inline_ctx);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	inline_ctx->hardirq_entry_attached = true;
+	ret = register_trace_hardirq_context_exit_tp(
+		irqstate_inline_hardirq_exit, inline_ctx);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	inline_ctx->hardirq_exit_attached = true;
 	ret = register_trace_softirq_context_exit_tp(irqstate_inline_bh_exit,
 						     inline_ctx);
 	KUNIT_ASSERT_EQ(test, ret, 0);
@@ -1065,6 +1709,7 @@ static void rv_test_irqstate_irq_exit_inline(struct kunit *test)
 		return;
 	}
 	WRITE_ONCE(inline_ctx->armed, true);
+	WRITE_ONCE(inline_ctx->raise_on_entry, true);
 	WRITE_ONCE(inline_ctx->raise_on_exit, true);
 	irq_enter_rcu();
 	tasklet_schedule(&inline_ctx->tasklet);
@@ -1090,6 +1735,8 @@ static void rv_test_irqstate_irq_exit_inline(struct kunit *test)
 	}
 
 	KUNIT_EXPECT_EQ(test, inline_ctx->tasklet_runs, 1U);
+	KUNIT_EXPECT_EQ(test, inline_ctx->nested_hardirq_runs, 1U);
+	KUNIT_EXPECT_EQ(test, inline_ctx->entry_tasklet_runs, 1U);
 	KUNIT_EXPECT_TRUE(test, inline_ctx->tasklet_serving);
 	KUNIT_EXPECT_TRUE(test, inline_ctx->tasklet_same_task);
 	KUNIT_EXPECT_TRUE(test, inline_ctx->tasklet_same_cpu);
@@ -1101,8 +1748,15 @@ static void rv_test_irqstate_irq_exit_inline(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, inline_ctx->exit_tasklet_runs, 1U);
 	KUNIT_EXPECT_EQ(test, inline_ctx->entries, 1U);
 	KUNIT_EXPECT_EQ(test, inline_ctx->exits, 1U);
+	KUNIT_EXPECT_EQ(test, inline_ctx->hardirq_entries, 1U);
+	KUNIT_EXPECT_EQ(test, inline_ctx->hardirq_exits, 1U);
+	KUNIT_EXPECT_EQ(test, inline_ctx->event_index, 4U);
+	KUNIT_EXPECT_TRUE(test, inline_ctx->entry_from_hardirq);
+	KUNIT_EXPECT_TRUE(test, inline_ctx->exit_from_hardirq);
 	KUNIT_EXPECT_FALSE(test, inline_ctx->bad_boundary_context);
 	KUNIT_EXPECT_FALSE(test, inline_ctx->bad_boundary_cpu);
+	KUNIT_EXPECT_FALSE(test, inline_ctx->bad_provenance);
+	KUNIT_EXPECT_FALSE(test, inline_ctx->bad_order);
 	KUNIT_EXPECT_EQ(test, preempt_count(), saved_count);
 	KUNIT_EXPECT_EQ(test, softirq_count(), saved_softirq);
 	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
@@ -1132,6 +1786,7 @@ static void rv_test_irqstate_rt_inline_bh(struct kunit *test)
 	inline_ctx = kunit_kzalloc(test, sizeof(*inline_ctx), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, inline_ctx);
 	inline_ctx->owner = current;
+	inline_ctx->expected_from_hardirq = false;
 	tasklet_setup(&inline_ctx->tasklet, irqstate_inline_bh_tasklet);
 	KUNIT_ASSERT_EQ(test, 0,
 			kunit_add_action_or_reset(test, irqstate_inline_bh_kill,
@@ -1171,8 +1826,13 @@ static void rv_test_irqstate_rt_inline_bh(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, inline_ctx->tasklet_bracketed);
 	KUNIT_EXPECT_EQ(test, inline_ctx->entries, 1U);
 	KUNIT_EXPECT_EQ(test, inline_ctx->exits, 1U);
+	KUNIT_EXPECT_EQ(test, inline_ctx->event_index, 2U);
+	KUNIT_EXPECT_FALSE(test, inline_ctx->entry_from_hardirq);
+	KUNIT_EXPECT_FALSE(test, inline_ctx->exit_from_hardirq);
 	KUNIT_EXPECT_FALSE(test, inline_ctx->bad_boundary_context);
 	KUNIT_EXPECT_FALSE(test, inline_ctx->bad_boundary_cpu);
+	KUNIT_EXPECT_FALSE(test, inline_ctx->bad_provenance);
+	KUNIT_EXPECT_FALSE(test, inline_ctx->bad_order);
 	KUNIT_EXPECT_EQ(test, preempt_count(), saved_count);
 	KUNIT_EXPECT_EQ(test, softirq_count(), saved_softirq);
 	RV_KUNIT_EXPECT_NO_REACTION(test, ctx);
@@ -1197,7 +1857,8 @@ static void irqstate_empty_worker_entry(void *data, bool serving,
 		empty_ctx->bad_order = true;
 	empty_ctx->event_index++;
 	empty_ctx->inside_pair = true;
-	if (!serving || !in_serving_softirq() || !irqs_disabled())
+	if (!serving || from_hardirq || !in_serving_softirq() ||
+	    !irqs_disabled())
 		empty_ctx->bad_boundary_context = true;
 	if (raw_smp_processor_id() != READ_ONCE(empty_ctx->owner_cpu))
 		empty_ctx->bad_boundary_cpu = true;
@@ -1214,7 +1875,8 @@ static void irqstate_empty_worker_exit(void *data, bool serving,
 	if (empty_ctx->event_index != 1 || !empty_ctx->inside_pair)
 		empty_ctx->bad_order = true;
 	empty_ctx->event_index++;
-	if (!serving || !in_serving_softirq() || !irqs_disabled())
+	if (!serving || from_hardirq || !in_serving_softirq() ||
+	    !irqs_disabled())
 		empty_ctx->bad_boundary_context = true;
 	if (raw_smp_processor_id() != READ_ONCE(empty_ctx->owner_cpu))
 		empty_ctx->bad_boundary_cpu = true;
@@ -1606,6 +2268,21 @@ static void rv_test_irqstate_rt_prepare_switch(struct kunit *test)
 }
 
 #else
+static void rv_test_irqstate_hardirq_exit_handoff(struct kunit *test)
+{
+	kunit_skip(test, "Requires built-in RV tests");
+}
+
+static void rv_test_irqstate_tick_exit_handoff(struct kunit *test)
+{
+	kunit_skip(test, "Requires built-in RV tests");
+}
+
+static void rv_test_irqstate_hardirq_exit_timer_handoff(struct kunit *test)
+{
+	kunit_skip(test, "Requires built-in RV tests");
+}
+
 static void rv_test_irqstate_irq_exit_inline(struct kunit *test)
 {
 	kunit_skip(test, "Requires built-in RV tests");
@@ -1649,6 +2326,9 @@ static void rv_test_irqstate_rt_prepare_switch(struct kunit *test)
 #define rv_test_irqstate_depth_overflow rv_test_stub
 #define rv_test_irqstate_sync rv_test_stub
 #define rv_test_irqstate_live_toggle rv_test_stub
+#define rv_test_irqstate_hardirq_exit_handoff rv_test_stub
+#define rv_test_irqstate_tick_exit_handoff rv_test_stub
+#define rv_test_irqstate_hardirq_exit_timer_handoff rv_test_stub
 #define rv_test_irqstate_irq_exit_inline rv_test_stub
 #define rv_test_irqstate_rt_inline_bh rv_test_stub
 #define rv_test_irqstate_rt_empty_worker rv_test_stub
