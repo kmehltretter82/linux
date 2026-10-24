@@ -731,11 +731,14 @@ static void __xen_pv_evtchn_do_upcall(struct pt_regs *regs)
 
 __visible noinstr void xen_pv_evtchn_do_upcall(struct pt_regs *regs)
 {
-	irqentry_state_t state = irqentry_enter(regs);
+	irqentry_state_t state = irqentry_hardirq_enter(regs);
+	struct irqentry_hardirq_cookie cookie =
+		irqentry_hardirq_count_state(state);
 	bool inhcall;
 
 	instrumentation_begin();
-	run_sysvec_on_irqstack_cond(__xen_pv_evtchn_do_upcall, regs);
+	run_sysvec_on_irqstack_cond_preempt_counted(__xen_pv_evtchn_do_upcall,
+						    regs, cookie);
 
 	inhcall = get_and_clear_inhcall();
 	if (inhcall && !WARN_ON_ONCE(state.exit_rcu)) {
