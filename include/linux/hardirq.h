@@ -4,6 +4,7 @@
 
 #include <linux/context_tracking_state.h>
 #include <linux/preempt.h>
+#include <linux/irqentry_hardirq.h>
 #include <linux/lockdep.h>
 #include <linux/ftrace_irq.h>
 #include <linux/sched.h>
@@ -25,9 +26,9 @@ static __always_inline void rcu_irq_enter_check_tick(void)
 		__rcu_irq_enter_check_tick();
 }
 
-void irq_enter_rcu_preempt_counted(struct preempt_count_add_state count_state);
-bool irq_exit_rcu_preempt_counted_prepare(struct preempt_count_add_state count_state);
-void noinstr irqentry_hardirq_tail_exit(struct preempt_count_add_state count_state);
+void irq_enter_rcu_preempt_counted(struct irqentry_hardirq_cookie cookie);
+bool irq_exit_rcu_preempt_counted_prepare(struct irqentry_hardirq_cookie cookie);
+void noinstr irqentry_hardirq_tail_exit(struct irqentry_hardirq_cookie cookie);
 
 /*
  * Prepare every potentially instrumentable part of hardirq teardown before
@@ -35,7 +36,7 @@ void noinstr irqentry_hardirq_tail_exit(struct preempt_count_add_state count_sta
  * finish helper without passing through instrumentable code.
  */
 static __always_inline bool
-irqentry_hardirq_exit_prepare(struct preempt_count_add_state count_state)
+irqentry_hardirq_exit_prepare(struct irqentry_hardirq_cookie cookie)
 {
 	bool do_sub;
 
@@ -44,8 +45,8 @@ irqentry_hardirq_exit_prepare(struct preempt_count_add_state count_state)
 	 * the final worker closure before conditionally removing an applied
 	 * raw hardirq count.
 	 */
-	do_sub = preempt_count_add_applied(count_state) &&
-		 preempt_count_sub_prepare(HARDIRQ_OFFSET);
+	do_sub = irqentry_hardirq_count_applied(cookie) &&
+		 irqentry_hardirq_count_sub_prepare();
 	lockdep_hardirq_exit_prepare();
 	return do_sub;
 }

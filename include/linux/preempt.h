@@ -217,70 +217,6 @@ static __always_inline unsigned char interrupt_context_level(void)
  */
 #define in_atomic_preempt_off() (preempt_count() != PREEMPT_DISABLE_OFFSET)
 
-/* Only shared-bit debug counts can reject a staged addition. */
-struct preempt_count_add_state {
-#if defined(CONFIG_DEBUG_PREEMPT) && \
-	!defined(CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS)
-	bool applied;
-#endif
-};
-
-static __always_inline bool
-preempt_count_add_applied(struct preempt_count_add_state state)
-{
-#if defined(CONFIG_DEBUG_PREEMPT) && \
-	!defined(CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS)
-	return state.applied;
-#else
-	return true;
-#endif
-}
-
-static __always_inline bool preempt_count_add_valid(void)
-{
-#ifdef CONFIG_DEBUG_PREEMPT
-	/*
-	 * On configurations without separate reschedule bits, preempt_count()
-	 * excludes any shared reschedule bit. A negative result therefore denotes
-	 * an existing underflow.
-	 */
-	if (!IS_ENABLED(CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS) &&
-	    preempt_count() < 0)
-		return false;
-#endif
-	return true;
-}
-
-#if defined(CONFIG_DEBUG_PREEMPT) && \
-	!defined(CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS)
-struct preempt_count_add_state noinstr
-preempt_count_add_start_slow(int val);
-#endif
-
-/*
- * Attempt the non-instrumentable part of a staged preempt-count addition and
- * record whether it was applied. The returned state must be passed to the
- * matching preempt_count_add_finish() and subtraction preparation. A rejected
- * state attempts deferred reporting and suppresses post-add bookkeeping and
- * the matching subtraction regardless of warning suppression.
- */
-static __always_inline struct preempt_count_add_state
-preempt_count_add_start(int val)
-{
-	struct preempt_count_add_state state = { };
-
-#if defined(CONFIG_DEBUG_PREEMPT) && \
-	!defined(CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS)
-	state.applied = true;
-	/* DEBUG_LOCKS_WARN_ON() permits the addition during an oops. */
-	if (unlikely(!preempt_count_add_valid()))
-		return preempt_count_add_start_slow(val);
-#endif
-	__preempt_count_add(val);
-
-	return state;
-}
-
 #if defined(CONFIG_DEBUG_PREEMPT) || defined(CONFIG_TRACE_PREEMPT_TOGGLE)
 extern void preempt_count_add(int val);
 extern void preempt_count_sub(int val);
@@ -290,16 +226,6 @@ extern void preempt_count_sub(int val);
 #define preempt_count_add(val)	__preempt_count_add(val)
 #define preempt_count_sub(val)	__preempt_count_sub(val)
 #define preempt_count_dec_and_test() __preempt_count_dec_and_test()
-#endif
-
-#if defined(CONFIG_PREEMPTION) && (defined(CONFIG_DEBUG_PREEMPT) || \
-					defined(CONFIG_TRACE_PREEMPT_TOGGLE))
-void preempt_count_add_finish(int val, struct preempt_count_add_state state);
-bool preempt_count_sub_prepare(int val);
-#else
-static __always_inline void
-preempt_count_add_finish(int val, struct preempt_count_add_state state) { }
-static __always_inline bool preempt_count_sub_prepare(int val) { return true; }
 #endif
 
 #define __preempt_count_inc() __preempt_count_add(1)
