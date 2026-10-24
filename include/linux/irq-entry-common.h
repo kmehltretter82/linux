@@ -327,6 +327,12 @@ static __always_inline void irqentry_exit_to_user_mode(struct pt_regs *regs)
 	exit_to_user_mode();
 }
 
+enum irqentry_hardirq_state {
+	IRQENTRY_HARDIRQ_NONE,
+	IRQENTRY_HARDIRQ_APPLIED,
+	IRQENTRY_HARDIRQ_REJECTED,
+};
+
 #ifndef irqentry_state
 /**
  * struct irqentry_state - Opaque object for exception state storage
@@ -345,12 +351,6 @@ static __always_inline void irqentry_exit_to_user_mode(struct pt_regs *regs)
  * and all members private.  Descriptions of the members are provided to aid in
  * the maintenance of the irqentry_*() functions.
  */
-enum irqentry_hardirq_state {
-	IRQENTRY_HARDIRQ_NONE,
-	IRQENTRY_HARDIRQ_APPLIED,
-	IRQENTRY_HARDIRQ_REJECTED,
-};
-
 typedef struct irqentry_state {
 	union {
 		bool	exit_rcu;
