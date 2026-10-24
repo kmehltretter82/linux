@@ -15,6 +15,7 @@
 
 #include <kunit/test.h>
 #include <kunit/test-bug.h>
+#include <linux/compiler.h>
 #include <linux/delay.h>
 
 int rv_set_testing(struct kunit_suite *suite);
@@ -28,18 +29,31 @@ struct rv_kunit_ctx {
 	struct task_struct *mock_tasks[RV_KUNIT_MAX_MOCK_TASKS];
 };
 
-#define RV_KUNIT_EXPECT_REACTION(test, ctx)                             \
-	do {                                                            \
-		KUNIT_EXPECT_EQ(test, ctx->reactions, ++ctx->expected); \
-		if (ctx->reactions != ctx->expected)                    \
-			ctx->expected = ctx->reactions;                 \
+#define RV_KUNIT_EXPECT_OBSERVED(test, ctx, observed, delta) \
+	do {                                                    \
+		struct rv_kunit_ctx *__rv_observed_ctx = (ctx); \
+		int __rv_observed = (observed);                 \
+		int __rv_expected =                            \
+			__rv_observed_ctx->expected + (delta);    \
+		KUNIT_EXPECT_EQ(test, __rv_observed,           \
+				__rv_expected);                     \
+		__rv_observed_ctx->expected = __rv_observed;   \
 	} while (0)
 
-#define RV_KUNIT_EXPECT_NO_REACTION(test, ctx)                        \
-	do {                                                          \
-		KUNIT_EXPECT_EQ(test, ctx->reactions, ctx->expected); \
-		if (ctx->reactions != ctx->expected)                  \
-			ctx->expected = ctx->reactions;               \
+#define RV_KUNIT_EXPECT_REACTION(test, ctx)                       \
+	do {                                                       \
+		struct rv_kunit_ctx *__rv_reaction_ctx = (ctx);     \
+		RV_KUNIT_EXPECT_OBSERVED(                            \
+			test, __rv_reaction_ctx,                      \
+			READ_ONCE(__rv_reaction_ctx->reactions), 1);  \
+	} while (0)
+
+#define RV_KUNIT_EXPECT_NO_REACTION(test, ctx)                    \
+	do {                                                       \
+		struct rv_kunit_ctx *__rv_reaction_ctx = (ctx);     \
+		RV_KUNIT_EXPECT_OBSERVED(                            \
+			test, __rv_reaction_ctx,                      \
+			READ_ONCE(__rv_reaction_ctx->reactions), 0);  \
 	} while (0)
 
 #define RV_KUNIT_EXPECT_REACTION_HERE(test, ctx)                             \
