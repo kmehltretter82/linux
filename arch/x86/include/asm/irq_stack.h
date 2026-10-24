@@ -152,6 +152,24 @@
 	}								\
 }
 
+/* Pair with irqentry_hardirq_enter(), which staged the raw IRQ state. */
+#define call_on_irqstack_cond_preempt_counted(func, regs, cookie, asm_call, \
+					       constr, c_args...)	\
+do {									\
+	struct irqentry_hardirq_cookie __cookie = (cookie);		\
+									\
+	static_assert(sizeof(__cookie) == 0);				\
+	if (user_mode(regs) || __this_cpu_read(hardirq_stack_inuse)) {	\
+		irq_enter_rcu_preempt_counted(__cookie);		\
+		func(c_args);						\
+		irq_exit_rcu_preempt_counted(__cookie);			\
+	} else {							\
+		__this_cpu_write(hardirq_stack_inuse, true);		\
+		call_on_irqstack(func, asm_call, constr);		\
+		__this_cpu_write(hardirq_stack_inuse, false);		\
+	}								\
+} while (0)
+
 /*
  * Function call sequence for __call_on_irqstack() for system vectors.
  *
@@ -182,6 +200,21 @@
 			      SYSVEC_CONSTRAINTS, regs);		\
 }
 
+#define ASM_CALL_SYSVEC_PREEMPT_COUNTED					\
+	"call irq_enter_rcu_preempt_counted\n"				\
+	ASM_CALL_ARG1							\
+	"call irq_exit_rcu_preempt_counted\n"
+
+#define run_sysvec_on_irqstack_cond_preempt_counted(func, regs, cookie)	\
+do {									\
+	assert_function_type(func, void (*)(struct pt_regs *));		\
+	assert_arg_type(regs, struct pt_regs *);			\
+									\
+	call_on_irqstack_cond_preempt_counted(func, regs, cookie,	\
+					      ASM_CALL_SYSVEC_PREEMPT_COUNTED, \
+					      SYSVEC_CONSTRAINTS, regs);	\
+} while (0)
+
 /*
  * As in ASM_CALL_SYSVEC above the clobbers force the compiler to store
  * @regs and @vector in callee saved registers.
@@ -202,6 +235,22 @@
 	call_on_irqstack_cond(func, regs, ASM_CALL_IRQ,			\
 			      IRQ_CONSTRAINTS, regs, vector);		\
 }
+
+#define ASM_CALL_IRQ_PREEMPT_COUNTED					\
+	"call irq_enter_rcu_preempt_counted\n"				\
+	ASM_CALL_ARG2							\
+	"call irq_exit_rcu_preempt_counted\n"
+
+#define run_irq_on_irqstack_cond_preempt_counted(func, regs, vector, cookie) \
+do {									\
+	assert_function_type(func, void (*)(struct pt_regs *, u32));	\
+	assert_arg_type(regs, struct pt_regs *);			\
+	assert_arg_type(vector, u32);					\
+									\
+	call_on_irqstack_cond_preempt_counted(func, regs, cookie,	\
+					      ASM_CALL_IRQ_PREEMPT_COUNTED, \
+					      IRQ_CONSTRAINTS, regs, vector); \
+} while (0)
 
 #ifdef CONFIG_SOFTIRQ_ON_OWN_STACK
 /*
@@ -228,6 +277,15 @@
 	irq_exit_rcu();							\
 }
 
+#define run_sysvec_on_irqstack_cond_preempt_counted(func, regs, cookie)	\
+do {									\
+	struct irqentry_hardirq_cookie __cookie = (cookie);		\
+									\
+	irq_enter_rcu_preempt_counted(__cookie);			\
+	func(regs);							\
+	irq_exit_rcu_preempt_counted(__cookie);				\
+} while (0)
+
 /* Switches to the irq stack within func() */
 #define run_irq_on_irqstack_cond(func, regs, vector)			\
 {									\
@@ -235,6 +293,15 @@
 	func(regs, vector);						\
 	irq_exit_rcu();							\
 }
+
+#define run_irq_on_irqstack_cond_preempt_counted(func, regs, vector, cookie) \
+do {									\
+	struct irqentry_hardirq_cookie __cookie = (cookie);		\
+									\
+	irq_enter_rcu_preempt_counted(__cookie);			\
+	func(regs, vector);						\
+	irq_exit_rcu_preempt_counted(__cookie);				\
+} while (0)
 
 #endif /* !CONFIG_X86_64 */
 
