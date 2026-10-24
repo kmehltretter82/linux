@@ -727,6 +727,7 @@ static __always_inline void irq_enter_rcu_common(void)
 
 /**
  * irq_enter_rcu_preempt_counted - Finish staged hardirq entry
+ * @count_state: Staged hardirq-count state from irqentry_hardirq_enter()
  *
  * Finish an early staged hardirq preempt-count attempt, then establish the
  * remaining timer and accounting state. The matching lockdep hardirq state
@@ -838,6 +839,7 @@ irq_exit_wake_late_softirqs(unsigned int wake_flags)
 
 /**
  * irqentry_hardirq_tail_exit - Close work and remove return-tail state
+ * @count_state: Staged hardirq-count state from irqentry_hardirq_enter()
  *
  * Run every instrumentable teardown operation, including the final worker
  * closure, before conditionally removing any applied raw hardirq count and
@@ -898,6 +900,7 @@ static __always_inline unsigned int __irq_exit_rcu(bool keep_hardirq_count)
 
 /**
  * irq_exit_rcu_preempt_counted_prepare - Process IRQ exit and prepare teardown
+ * @count_state: Staged hardirq-count state from irqentry_hardirq_enter()
  *
  * The caller staged a hardirq-count attempt and established lockdep state
  * before instrumentable IRQ entry. Carry any applied count across traceable
