@@ -157,3 +157,16 @@ module_exit(unregister_irqexit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Karl Mehltretter <kmehltretter@gmail.com>");
 MODULE_DESCRIPTION("irqexit: verify IRQ-exit scheduling ownership");
+
+#if IS_ENABLED(CONFIG_RV_MONITORS_KUNIT_TEST)
+#include <kunit/visibility.h>
+#include "irqexit_kunit.h"
+
+const struct rv_irqexit_ops rv_irqexit_ops = {
+	.mon = RV_MON_OPS_INIT(),
+	.handle_resched_entry = handle_resched_entry,
+	.handle_resched_exit = handle_resched_exit,
+	.handle_sched_switch = handle_sched_switch,
+};
+EXPORT_SYMBOL_IF_KUNIT(rv_irqexit_ops);
+#endif
