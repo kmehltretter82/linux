@@ -933,6 +933,21 @@ irq_exit_rcu_preempt_counted_prepare(struct irqentry_hardirq_cookie cookie)
 }
 
 /**
+ * irq_exit_rcu_preempt_counted - Exit hardirq with its count already set
+ * @cookie: Result from the matching irqentry_hardirq_count_start()
+ *
+ * Complete the instrumentable hardirq exit work, then remove the raw
+ * preempt count and lockdep nesting without returning to instrumentable code.
+ */
+void noinstr irq_exit_rcu_preempt_counted(struct irqentry_hardirq_cookie cookie)
+{
+	bool do_sub;
+
+	do_sub = irq_exit_rcu_preempt_counted_prepare(cookie);
+	irqentry_hardirq_exit_finish(do_sub);
+}
+
+/**
  * irq_exit_rcu() - Exit an interrupt context without updating RCU
  *
  * Also processes softirqs if needed and possible.
