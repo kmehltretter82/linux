@@ -383,6 +383,25 @@ irqentry_hardirq_count_state_set(irqentry_state_t *state,
 		IRQENTRY_HARDIRQ_APPLIED : IRQENTRY_HARDIRQ_REJECTED;
 }
 
+/*
+ * Stage only the hardirq classification needed by a traceable return tail.
+ * IRQ accounting, RCU and tick handling must already be complete.
+ */
+static __always_inline struct irqentry_hardirq_cookie
+__irqentry_hardirq_tail_enter(void)
+{
+	struct irqentry_hardirq_cookie cookie;
+
+	cookie = irqentry_hardirq_count_start();
+	lockdep_hardirq_enter();
+
+	instrumentation_begin();
+	irqentry_hardirq_count_finish(cookie);
+	instrumentation_end();
+
+	return cookie;
+}
+
 /**
  * irqentry_hardirq_tail_enter - Stage ordinary-hardirq return-tail state
  * @state: Pointer to state returned by the matching irqentry_hardirq_enter()
@@ -400,12 +419,7 @@ irqentry_hardirq_tail_enter(irqentry_state_t *state)
 	if (!state->hardirq)
 		return;
 
-	cookie = irqentry_hardirq_count_start();
-	lockdep_hardirq_enter();
-
-	instrumentation_begin();
-	irqentry_hardirq_count_finish(cookie);
-	instrumentation_end();
+	cookie = __irqentry_hardirq_tail_enter();
 	irqentry_hardirq_count_state_set(state, cookie);
 }
 

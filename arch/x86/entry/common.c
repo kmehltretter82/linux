@@ -18,6 +18,8 @@
 noinstr void x86_entry_from_kvm(unsigned int event_type, unsigned int vector)
 {
 	if (event_type == EVENT_TYPE_EXTINT) {
+		unsigned long tif_work;
+
 #ifdef CONFIG_X86_64
 		/*
 		 * Use FRED dispatch, even when running IDT. The dispatch
@@ -29,16 +31,25 @@ noinstr void x86_entry_from_kvm(unsigned int event_type, unsigned int vector)
 		idt_entry_from_kvm(vector);
 #endif
 		/*
-		 * Strictly speaking, only the NMI path requires noinstr.
-		 */
-		instrumentation_begin();
-		/*
 		 * KVM/VMX will dispatch from IRQ-disabled but for a context
 		 * that will have IRQs-enabled. This confuses the entry code
-		 * and it will not have reprogrammed the timer. Do so now.
+		 * and it will not have reprogrammed the timer. Preserve the
+		 * interrupt's hardirq classification while doing so.
 		 */
-		hrtimer_rearm_deferred();
-		instrumentation_end();
+		if (IS_ENABLED(CONFIG_HRTIMER_REARM_DEFERRED)) {
+			tif_work = read_thread_flags();
+			if (unlikely(tif_work & _TIF_HRTIMER_REARM)) {
+				struct irqentry_hardirq_cookie cookie;
+
+				cookie = __irqentry_hardirq_tail_enter();
+
+				instrumentation_begin();
+				hrtimer_rearm_deferred_tif(tif_work);
+				instrumentation_end();
+
+				irqentry_hardirq_tail_exit(cookie);
+			}
+		}
 
 		return;
 	}
