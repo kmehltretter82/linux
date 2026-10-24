@@ -207,6 +207,62 @@ DEFINE_EVENT(tasklet, tasklet_exit,
 	TP_ARGS(t, func)
 );
 
+/*
+ * Following tracepoints are not exported in tracefs and provide hooking
+ * mechanisms only for testing and debugging purposes.
+ */
+
+/**
+ * hardirq_context_entry - generic hardirq state has been established
+ * @depth: hardirq nesting depth, including the context being entered
+ *
+ * This tracepoint is emitted after generic hardirq preempt-count, lockdep,
+ * timer, and accounting state has been established. It does not describe the
+ * architecture-specific interval before irq_enter() or irq_enter_rcu().
+ */
+DECLARE_TRACE(hardirq_context_entry,
+	      TP_PROTO(unsigned int depth),
+	      TP_ARGS(depth));
+
+/**
+ * hardirq_context_exit - generic hardirq state is about to be removed
+ * @depth: hardirq nesting depth, including the context being exited
+ *
+ * This tracepoint is emitted with interrupts disabled near the end of generic
+ * hardirq exit, after tick-exit work and before hardirq preempt-count state is
+ * removed. A late-work handoff may run after callbacks return. Hardirq
+ * accounting ends earlier.
+ */
+DECLARE_TRACE(hardirq_context_exit,
+	      TP_PROTO(unsigned int depth),
+	      TP_ARGS(depth));
+
+/**
+ * softirq_context_entry - serving-softirq state has been established
+ * @serving: whether the current task is serving a softirq
+ * @from_hardirq: whether hardirq state was replaced by serving-softirq state
+ *
+ * This tracepoint runs with local interrupts disabled after the serving bit is
+ * set. On PREEMPT_RT it includes preparation before handle_softirqs(), even
+ * if the pending-work check finds nothing. It does not mark an individual
+ * action or the start of CPU-time accounting.
+ */
+DECLARE_TRACE(softirq_context_entry,
+	      TP_PROTO(bool serving, bool from_hardirq),
+	      TP_ARGS(serving, from_hardirq));
+
+/**
+ * softirq_context_exit - serving-softirq state is about to be removed
+ * @serving: whether the current task is serving a softirq
+ * @from_hardirq: whether hardirq state will replace serving-softirq state
+ *
+ * This tracepoint runs with local interrupts disabled before the serving bit is
+ * cleared. On PREEMPT_RT this includes teardown after handle_softirqs().
+ */
+DECLARE_TRACE(softirq_context_exit,
+	      TP_PROTO(bool serving, bool from_hardirq),
+	      TP_ARGS(serving, from_hardirq));
+
 #endif /*  _TRACE_IRQ_H */
 
 /* This part must be outside protection */
