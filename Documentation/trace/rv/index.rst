@@ -15,6 +15,7 @@ Runtime Verification
    monitor_wip.rst
    monitor_wwnr.rst
    monitor_sched.rst
+   monitor_irq.rst
    monitor_rtapp.rst
    monitor_stall.rst
    monitor_deadline.rst
