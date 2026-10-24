@@ -334,9 +334,8 @@ static __always_inline void irqentry_exit_to_user_mode(struct pt_regs *regs)
  *            exit path has to invoke ct_irq_exit().
  * @lockdep: Used exclusively in the irqentry_nmi_*() calls; ensures that
  *           lockdep state is restored correctly on exit from nmi.
- * @hardirq: Records ordinary-hardirq provenance from
- *           irqentry_hardirq_enter().
- * @hardirq_count: State of the current staged hardirq-count attempt.
+ * @hardirq: Encodes ordinary-hardirq provenance and whether the current
+ *           staged hardirq-count attempt was applied.
  *
  * This opaque object is filled in by the irqentry_*_enter() functions and
  * must be passed back into the corresponding irqentry_*_exit() functions
@@ -346,13 +345,18 @@ static __always_inline void irqentry_exit_to_user_mode(struct pt_regs *regs)
  * and all members private.  Descriptions of the members are provided to aid in
  * the maintenance of the irqentry_*() functions.
  */
+enum irqentry_hardirq_state {
+	IRQENTRY_HARDIRQ_NONE,
+	IRQENTRY_HARDIRQ_APPLIED,
+	IRQENTRY_HARDIRQ_REJECTED,
+};
+
 typedef struct irqentry_state {
 	union {
 		bool	exit_rcu;
 		bool	lockdep;
 	};
-	bool		hardirq;
-	struct preempt_count_add_state hardirq_count;
+	u8		hardirq;
 } irqentry_state_t;
 #endif
 
@@ -361,7 +365,21 @@ irqentry_state_t noinstr irqentry_hardirq_enter(struct pt_regs *regs);
 static __always_inline struct preempt_count_add_state
 irqentry_hardirq_count_state(irqentry_state_t state)
 {
-	return state.hardirq_count;
+	struct preempt_count_add_state count_state = { };
+
+#if defined(CONFIG_DEBUG_PREEMPT) && \
+	!defined(CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS)
+	count_state.applied = state.hardirq == IRQENTRY_HARDIRQ_APPLIED;
+#endif
+	return count_state;
+}
+
+static __always_inline void
+irqentry_hardirq_count_state_set(irqentry_state_t *state,
+				 struct preempt_count_add_state count_state)
+{
+	state->hardirq = preempt_count_add_applied(count_state) ?
+		IRQENTRY_HARDIRQ_APPLIED : IRQENTRY_HARDIRQ_REJECTED;
 }
 
 /**
@@ -387,7 +405,7 @@ irqentry_hardirq_tail_enter(irqentry_state_t *state)
 	instrumentation_begin();
 	preempt_count_add_finish(HARDIRQ_OFFSET, count_state);
 	instrumentation_end();
-	state->hardirq_count = count_state;
+	irqentry_hardirq_count_state_set(state, count_state);
 }
 
 /**
@@ -419,7 +437,8 @@ __irqentry_enter_from_kernel_mode(struct pt_regs *regs, bool hardirq)
 {
 	irqentry_state_t ret = {
 		.exit_rcu = false,
-		.hardirq = hardirq,
+		.hardirq = hardirq ? IRQENTRY_HARDIRQ_APPLIED :
+				      IRQENTRY_HARDIRQ_NONE,
 	};
 
 	/*
@@ -569,7 +588,7 @@ irqentry_exit_to_kernel_mode_after_preempt(struct pt_regs *regs, irqentry_state_
 		if (state.exit_rcu)
 			ct_state = ct_irq_exit_prepare();
 
-		irqentry_hardirq_tail_exit(state.hardirq_count);
+		irqentry_hardirq_tail_exit(irqentry_hardirq_count_state(state));
 
 		if (state.exit_rcu)
 			ct_irq_exit_finish(ct_state);
