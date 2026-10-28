@@ -510,13 +510,14 @@ irqentry_enter_from_kernel_mode(struct pt_regs *regs)
  * re-establish the tracing, lockdep and RCU state for returning to the
  * interrupted context.
  */
-static inline void irqentry_exit_to_kernel_mode_preempt(struct pt_regs *regs,
-							irqentry_state_t state)
+static __always_inline void
+irqentry_exit_to_kernel_mode_preempt(struct pt_regs *regs,
+				     irqentry_state_t state)
 {
 	if (regs_irqs_disabled(regs) || state.exit_rcu)
 		return;
 
-	if (IS_ENABLED(CONFIG_PREEMPTION))
+	if (IS_ENABLED(CONFIG_PREEMPTION) && !preempt_count())
 		irqentry_exit_cond_resched();
 }
 
