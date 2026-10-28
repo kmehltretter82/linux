@@ -67,6 +67,22 @@ void trace_hardirqs_on_prepare(void)
 EXPORT_SYMBOL(trace_hardirqs_on_prepare);
 NOKPROBE_SYMBOL(trace_hardirqs_on_prepare);
 
+/*
+ * Like trace_hardirqs_on_prepare(), but invoked while the ordinary-hardirq
+ * return tail holds a synthetic HARDIRQ_OFFSET in preempt_count(). Discount
+ * that tail offset when checking whether the return target has preemption
+ * disabled.
+ */
+void trace_hardirqs_on_prepare_irqtail(void)
+{
+	if (this_cpu_read(tracing_irq_cpu)) {
+		trace(irq_enable, TP_ARGS(CALLER_ADDR0, CALLER_ADDR1));
+		tracer_hardirqs_on_irqtail(CALLER_ADDR0, CALLER_ADDR1);
+		this_cpu_write(tracing_irq_cpu, 0);
+	}
+}
+NOKPROBE_SYMBOL(trace_hardirqs_on_prepare_irqtail);
+
 void trace_hardirqs_on(void)
 {
 	if (this_cpu_read(tracing_irq_cpu)) {

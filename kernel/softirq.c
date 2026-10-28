@@ -814,11 +814,6 @@ static __always_inline bool irq_exit_wake_timersd(void)
 	return true;
 }
 
-enum irq_exit_wake_flags {
-	IRQ_EXIT_WAKE_KSOFTIRQD	= BIT(0),
-	IRQ_EXIT_WAKE_KTIMERD	= BIT(1),
-};
-
 static __always_inline void
 irq_exit_wake_late_softirqs(unsigned int wake_flags)
 {
@@ -836,6 +831,29 @@ irq_exit_wake_late_softirqs(unsigned int wake_flags)
 	if (!ktimerd_wake_requested && irq_exit_wake_timersd() &&
 	    !ksoftirqd_wake_requested)
 		irq_exit_wake_ksoftirqd();
+}
+
+/**
+ * irqentry_hardirq_tail_exit - Close work and remove return-tail state
+ * @cookie:	Staged hardirq-count cookie from irqentry_hardirq_tail_enter()
+ * @wake_flags:	IRQ_EXIT_WAKE_* flags for workers already woken before the tail
+ *
+ * Run every instrumentable teardown operation, including the final worker
+ * closure, before conditionally removing any applied raw hardirq count and
+ * ending lockdep nesting.
+ */
+void noinstr
+irqentry_hardirq_tail_exit(struct irqentry_hardirq_cookie cookie,
+			   unsigned int wake_flags)
+{
+	bool do_sub;
+
+	instrumentation_begin();
+	do_sub = irqentry_hardirq_tail_exit_prepare(cookie);
+	irq_exit_wake_late_softirqs(wake_flags);
+	instrumentation_end();
+
+	irqentry_hardirq_exit_finish(do_sub);
 }
 
 static __always_inline unsigned int __irq_exit_rcu(bool keep_hardirq_count)

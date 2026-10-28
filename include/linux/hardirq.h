@@ -26,8 +26,15 @@ static __always_inline void rcu_irq_enter_check_tick(void)
 		__rcu_irq_enter_check_tick();
 }
 
+enum irq_exit_wake_flags {
+	IRQ_EXIT_WAKE_KSOFTIRQD	= BIT(0),
+	IRQ_EXIT_WAKE_KTIMERD	= BIT(1),
+};
+
 void irq_enter_rcu_preempt_counted(struct irqentry_hardirq_cookie cookie);
 bool irq_exit_rcu_preempt_counted_prepare(struct irqentry_hardirq_cookie cookie);
+void noinstr irqentry_hardirq_tail_exit(struct irqentry_hardirq_cookie cookie,
+					unsigned int wake_flags);
 
 /*
  * Prepare every potentially instrumentable part of hardirq teardown before
@@ -45,6 +52,16 @@ irqentry_hardirq_exit_prepare(struct irqentry_hardirq_cookie cookie)
 	 * raw hardirq count.
 	 */
 	do_sub = irqentry_hardirq_count_sub_prepare(cookie);
+	lockdep_hardirq_exit_prepare();
+	return do_sub;
+}
+
+static __always_inline bool
+irqentry_hardirq_tail_exit_prepare(struct irqentry_hardirq_cookie cookie)
+{
+	bool do_sub;
+
+	do_sub = irqentry_hardirq_tail_count_sub_prepare(cookie);
 	lockdep_hardirq_exit_prepare();
 	return do_sub;
 }

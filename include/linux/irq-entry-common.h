@@ -4,6 +4,7 @@
 
 #include <linux/context_tracking.h>
 #include <linux/hrtimer_rearm.h>
+#include <linux/interrupt.h>
 #include <linux/kmsan.h>
 #include <linux/preempt.h>
 #include <linux/irqentry_hardirq.h>
@@ -340,9 +341,11 @@ static __always_inline void irqentry_exit_to_user_mode(struct pt_regs *regs)
 }
 
 enum irqentry_hardirq_state {
-	IRQENTRY_HARDIRQ_NONE,
-	IRQENTRY_HARDIRQ_APPLIED,
-	IRQENTRY_HARDIRQ_REJECTED,
+	IRQENTRY_HARDIRQ_NONE			= 0,
+	IRQENTRY_HARDIRQ_APPLIED		= BIT(0),
+	IRQENTRY_HARDIRQ_REJECTED		= BIT(1),
+	IRQENTRY_HARDIRQ_KSOFTIRQD_WOKEN	= BIT(2),
+	IRQENTRY_HARDIRQ_KTIMERD_WOKEN		= BIT(3),
 };
 
 #ifndef irqentry_state
@@ -352,8 +355,9 @@ enum irqentry_hardirq_state {
  *            exit path has to invoke ct_irq_exit().
  * @lockdep: Used exclusively in the irqentry_nmi_*() calls; ensures that
  *           lockdep state is restored correctly on exit from nmi.
- * @hardirq: Encodes ordinary-hardirq provenance and whether the current
- *           staged hardirq-count attempt was applied.
+ * @hardirq: Encodes ordinary-hardirq provenance, whether the current staged
+ *           hardirq-count attempt was applied, and which softirq/timer workers
+ *           were already woken before the return tail.
  *
  * This opaque object is filled in by the irqentry_*_enter() functions and
  * must be passed back into the corresponding irqentry_*_exit() functions
@@ -381,7 +385,7 @@ irqentry_hardirq_count_state(irqentry_state_t state)
 
 #if defined(CONFIG_DEBUG_PREEMPT) && \
 	!defined(CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS)
-	cookie.applied = state.hardirq == IRQENTRY_HARDIRQ_APPLIED;
+	cookie.applied = !!(state.hardirq & IRQENTRY_HARDIRQ_APPLIED);
 #endif
 	return cookie;
 }
@@ -392,6 +396,51 @@ irqentry_hardirq_count_state_set(irqentry_state_t *state,
 {
 	state->hardirq = irqentry_hardirq_count_applied(cookie) ?
 		IRQENTRY_HARDIRQ_APPLIED : IRQENTRY_HARDIRQ_REJECTED;
+}
+
+static __always_inline unsigned int
+irqentry_hardirq_tail_wake_flags(irqentry_state_t state)
+{
+	unsigned int wake_flags = 0;
+
+	if (state.hardirq & IRQENTRY_HARDIRQ_KSOFTIRQD_WOKEN)
+		wake_flags |= IRQ_EXIT_WAKE_KSOFTIRQD;
+	if (state.hardirq & IRQENTRY_HARDIRQ_KTIMERD_WOKEN)
+		wake_flags |= IRQ_EXIT_WAKE_KTIMERD;
+	return wake_flags;
+}
+
+/**
+ * irqentry_hardirq_tail_enter - Stage ordinary-hardirq return-tail state
+ * @state: Pointer to state returned by the matching irqentry_hardirq_enter()
+ *
+ * Make a fresh staged hardirq-count attempt and establish the lockdep
+ * classification which traceable return-tail work needs. Accounting, RCU and
+ * tick handling belong to the completed interrupt and must not be repeated
+ * here.
+ */
+static __always_inline void
+irqentry_hardirq_tail_enter(irqentry_state_t *state)
+{
+	struct irqentry_hardirq_cookie cookie;
+	u8 wake_state = 0;
+
+	if (!state->hardirq)
+		return;
+
+	cookie = irqentry_hardirq_count_start();
+	lockdep_hardirq_enter();
+
+	instrumentation_begin();
+	if (local_softirq_pending())
+		wake_state |= IRQENTRY_HARDIRQ_KSOFTIRQD_WOKEN;
+	if (IS_ENABLED(CONFIG_IRQ_FORCED_THREADING) &&
+	    local_timers_pending_force_th())
+		wake_state |= IRQENTRY_HARDIRQ_KTIMERD_WOKEN;
+	irqentry_hardirq_tail_count_finish(cookie);
+	instrumentation_end();
+	irqentry_hardirq_count_state_set(state, cookie);
+	state->hardirq |= wake_state;
 }
 
 /**
@@ -533,7 +582,10 @@ irqentry_exit_to_kernel_mode_preempt(struct pt_regs *regs,
  *
  * The rearm on return to user mode needs no such annotation: no locks are
  * held there, so it uses the same lock chains as the rearm in hardirq
- * context.
+ * context. Ordinary-hardirq return paths do not use this wrapper: their saved
+ * provenance makes a fresh hardirq-count attempt and establishes lockdep
+ * nesting across the whole traceable tail. They call
+ * hrtimer_rearm_deferred() directly.
  */
 static __always_inline void irqentry_hrtimer_rearm_deferred(void)
 {
@@ -542,13 +594,24 @@ static __always_inline void irqentry_hrtimer_rearm_deferred(void)
 	lockdep_hardirq_exit();
 }
 
+static __always_inline void
+irqentry_trace_hardirqs_on_prepare_irqtail(struct irqentry_hardirq_cookie cookie)
+{
+	if (irqentry_hardirq_count_applied(cookie))
+		trace_hardirqs_on_prepare_irqtail();
+	else
+		trace_hardirqs_on_prepare();
+}
+
 /**
  * irqentry_exit_to_kernel_mode_after_preempt - Establish trace, lockdep and RCU state
  * @regs:	Pointer to current's pt_regs
  * @state:	Return value from matching call to irqentry_enter_from_kernel_mode()
  *
  * This is to be invoked after irqentry_exit_to_kernel_mode_preempt() and before
- * actually returning to the interrupted context.
+ * actually returning to the interrupted context. If @state records ordinary
+ * hardirq provenance, the caller must first invoke
+ * irqentry_hardirq_tail_enter() exactly once.
  *
  * There are no requirements for the CPU state other than being able to complete
  * the tracing, lockdep and RCU state transitions. After this function returns
@@ -557,6 +620,35 @@ static __always_inline void irqentry_hrtimer_rearm_deferred(void)
 static __always_inline void
 irqentry_exit_to_kernel_mode_after_preempt(struct pt_regs *regs, irqentry_state_t state)
 {
+	struct ct_irq_exit_state ct_state = { };
+
+	if (state.hardirq) {
+		struct irqentry_hardirq_cookie cookie =
+			irqentry_hardirq_count_state(state);
+
+		if (!regs_irqs_disabled(regs)) {
+			instrumentation_begin();
+			hrtimer_rearm_deferred();
+			/* Tell the tracer that the return will enable IRQs. */
+			irqentry_trace_hardirqs_on_prepare_irqtail(cookie);
+			lockdep_hardirqs_on_prepare_irqtail();
+			instrumentation_end();
+		}
+
+		if (state.exit_rcu)
+			ct_state = ct_irq_exit_prepare();
+
+		irqentry_hardirq_tail_exit(cookie,
+					   irqentry_hardirq_tail_wake_flags(state));
+
+		if (state.exit_rcu)
+			ct_irq_exit_finish(ct_state);
+
+		if (!regs_irqs_disabled(regs))
+			lockdep_hardirqs_on(CALLER_ADDR0);
+		return;
+	}
+
 	if (!regs_irqs_disabled(regs)) {
 		/*
 		 * If RCU was not watching on entry this needs to be done
@@ -598,7 +690,8 @@ irqentry_exit_to_kernel_mode_after_preempt(struct pt_regs *regs, irqentry_state_
  *
  * This is the counterpart of irqentry_enter_from_kernel_mode() and combines
  * the calls to irqentry_exit_to_kernel_mode_preempt() and
- * irqentry_exit_to_kernel_mode_after_preempt().
+ * irqentry_exit_to_kernel_mode_after_preempt(). It also establishes the
+ * conditional hardirq return tail between those calls.
  *
  * The requirement for the CPU state is that it can schedule. After the function
  * returns the tracing, lockdep and RCU state transitions are completed and the
@@ -613,6 +706,7 @@ static __always_inline void irqentry_exit_to_kernel_mode(struct pt_regs *regs,
 	irqentry_exit_to_kernel_mode_preempt(regs, state);
 	instrumentation_end();
 
+	irqentry_hardirq_tail_enter(&state);
 	irqentry_exit_to_kernel_mode_after_preempt(regs, state);
 }
 

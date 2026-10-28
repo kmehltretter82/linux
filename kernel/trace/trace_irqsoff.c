@@ -640,6 +640,13 @@ void tracer_hardirqs_on(unsigned long a0, unsigned long a1)
 }
 NOKPROBE_SYMBOL(tracer_hardirqs_on);
 
+void tracer_hardirqs_on_irqtail(unsigned long a0, unsigned long a1)
+{
+	if (!preempt_trace(preempt_count() - HARDIRQ_OFFSET) && irq_trace())
+		stop_critical_timing(a0, a1);
+}
+NOKPROBE_SYMBOL(tracer_hardirqs_on_irqtail);
+
 void tracer_hardirqs_off(unsigned long a0, unsigned long a1)
 {
 	if (!preempt_trace(preempt_count()) && irq_trace())

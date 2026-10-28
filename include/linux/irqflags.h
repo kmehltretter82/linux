@@ -47,6 +47,7 @@ DECLARE_PER_CPU(int, hardirqs_enabled);
 DECLARE_PER_CPU(int, hardirq_context);
 
 extern void trace_hardirqs_on_prepare(void);
+void trace_hardirqs_on_prepare_irqtail(void);
 extern void trace_hardirqs_off_finish(void);
 void trace_hardirqs_off_finish_preempt_counted(void);
 extern void trace_hardirqs_on(void);
@@ -117,6 +118,7 @@ do {						\
 
 #else
 # define trace_hardirqs_on_prepare()		do { } while (0)
+# define trace_hardirqs_on_prepare_irqtail()	do { } while (0)
 # define trace_hardirqs_off_finish()		do { } while (0)
 # define trace_hardirqs_off_finish_preempt_counted() do { } while (0)
 # define trace_hardirqs_on()			do { } while (0)
