@@ -99,6 +99,22 @@ void trace_hardirqs_off_finish(void)
 EXPORT_SYMBOL(trace_hardirqs_off_finish);
 NOKPROBE_SYMBOL(trace_hardirqs_off_finish);
 
+/*
+ * Like trace_hardirqs_off_finish(), but invoked after irqentry_hardirq_enter()
+ * has already applied HARDIRQ_OFFSET to preempt_count(). Discount that staged
+ * hardirq offset when checking whether the interrupted context already had
+ * preemption disabled.
+ */
+void trace_hardirqs_off_finish_preempt_counted(void)
+{
+	if (!this_cpu_read(tracing_irq_cpu)) {
+		this_cpu_write(tracing_irq_cpu, 1);
+		tracer_hardirqs_off_preempt_counted(CALLER_ADDR0, CALLER_ADDR1);
+		trace(irq_disable, TP_ARGS(CALLER_ADDR0, CALLER_ADDR1));
+	}
+}
+NOKPROBE_SYMBOL(trace_hardirqs_off_finish_preempt_counted);
+
 void trace_hardirqs_off(void)
 {
 	lockdep_hardirqs_off(CALLER_ADDR0);

@@ -647,6 +647,13 @@ void tracer_hardirqs_off(unsigned long a0, unsigned long a1)
 }
 NOKPROBE_SYMBOL(tracer_hardirqs_off);
 
+void tracer_hardirqs_off_preempt_counted(unsigned long a0, unsigned long a1)
+{
+	if (!preempt_trace(preempt_count() - HARDIRQ_OFFSET) && irq_trace())
+		start_critical_timing(a0, a1);
+}
+NOKPROBE_SYMBOL(tracer_hardirqs_off_preempt_counted);
+
 static int irqsoff_tracer_init(struct trace_array *tr)
 {
 	trace_type = TRACER_IRQS_OFF;

@@ -5,6 +5,8 @@
 #include <linux/context_tracking.h>
 #include <linux/hrtimer_rearm.h>
 #include <linux/kmsan.h>
+#include <linux/preempt.h>
+#include <linux/irqentry_hardirq.h>
 #include <linux/rseq_entry.h>
 #include <linux/static_call_types.h>
 #include <linux/syscalls.h>
@@ -75,9 +77,20 @@ static __always_inline void arch_enter_from_user_mode(struct pt_regs *regs) {}
 static __always_inline bool arch_in_rcu_eqs(void) { return false; }
 #endif
 
+static __always_inline void
+irqentry_trace_hardirqs_off_finish(bool count_applied)
+{
+	if (count_applied)
+		trace_hardirqs_off_finish_preempt_counted();
+	else
+		trace_hardirqs_off_finish();
+}
+
 /**
- * enter_from_user_mode - Establish state when coming from user mode
- * @regs:	Pointer to currents pt_regs
+ * __enter_from_user_mode - Establish state when coming from user mode
+ * @regs:		Pointer to currents pt_regs
+ * @hardirq:		Whether to establish hardirq lockdep context before tracing
+ * @count_applied:	Whether HARDIRQ_OFFSET was staged in preempt_count()
  *
  * Syscall/interrupt entry disables interrupts, but user mode is traced as
  * interrupts enabled. Also with NO_HZ_FULL RCU might be idle.
@@ -95,18 +108,27 @@ static __always_inline bool arch_in_rcu_eqs(void) { return false; }
  * done between establishing state and enabling interrupts. The caller must
  * enable interrupts before invoking syscall_enter_from_user_mode_work().
  */
-static __always_inline void enter_from_user_mode(struct pt_regs *regs)
+static __always_inline void __enter_from_user_mode(struct pt_regs *regs,
+						   bool hardirq,
+						   bool count_applied)
 {
 	arch_enter_from_user_mode(regs);
 	lockdep_hardirqs_off(CALLER_ADDR0);
+	if (hardirq)
+		lockdep_hardirq_enter();
 
 	CT_WARN_ON(__ct_state() != CT_STATE_USER);
 	user_exit_irqoff();
 
 	instrumentation_begin();
 	kmsan_unpoison_entry_regs(regs);
-	trace_hardirqs_off_finish();
+	irqentry_trace_hardirqs_off_finish(count_applied);
 	instrumentation_end();
+}
+
+static __always_inline void enter_from_user_mode(struct pt_regs *regs)
+{
+	__enter_from_user_mode(regs, false, false);
 }
 
 /**
@@ -317,6 +339,12 @@ static __always_inline void irqentry_exit_to_user_mode(struct pt_regs *regs)
 	exit_to_user_mode();
 }
 
+enum irqentry_hardirq_state {
+	IRQENTRY_HARDIRQ_NONE,
+	IRQENTRY_HARDIRQ_APPLIED,
+	IRQENTRY_HARDIRQ_REJECTED,
+};
+
 #ifndef irqentry_state
 /**
  * struct irqentry_state - Opaque object for exception state storage
@@ -324,6 +352,8 @@ static __always_inline void irqentry_exit_to_user_mode(struct pt_regs *regs)
  *            exit path has to invoke ct_irq_exit().
  * @lockdep: Used exclusively in the irqentry_nmi_*() calls; ensures that
  *           lockdep state is restored correctly on exit from nmi.
+ * @hardirq: Encodes whether the current staged hardirq-count attempt was
+ *           applied.
  *
  * This opaque object is filled in by the irqentry_*_enter() functions and
  * must be passed back into the corresponding irqentry_*_exit() functions
@@ -338,8 +368,31 @@ typedef struct irqentry_state {
 		bool	exit_rcu;
 		bool	lockdep;
 	};
+	u8		hardirq;
 } irqentry_state_t;
 #endif
+
+irqentry_state_t noinstr irqentry_hardirq_enter(struct pt_regs *regs);
+
+static __always_inline struct irqentry_hardirq_cookie
+irqentry_hardirq_count_state(irqentry_state_t state)
+{
+	struct irqentry_hardirq_cookie cookie = { };
+
+#if defined(CONFIG_DEBUG_PREEMPT) && \
+	!defined(CONFIG_HAS_SEPARATE_PREEMPT_RESCHED_BITS)
+	cookie.applied = state.hardirq == IRQENTRY_HARDIRQ_APPLIED;
+#endif
+	return cookie;
+}
+
+static __always_inline void
+irqentry_hardirq_count_state_set(irqentry_state_t *state,
+				 struct irqentry_hardirq_cookie cookie)
+{
+	state->hardirq = irqentry_hardirq_count_applied(cookie) ?
+		IRQENTRY_HARDIRQ_APPLIED : IRQENTRY_HARDIRQ_REJECTED;
+}
 
 /**
  * irqentry_exit_cond_resched - Conditionally reschedule on return from interrupt
@@ -349,8 +402,10 @@ typedef struct irqentry_state {
 void irqentry_exit_cond_resched(void);
 
 /**
- * irqentry_enter_from_kernel_mode - Establish state before invoking the irq handler
- * @regs:	Pointer to currents pt_regs
+ * __irqentry_enter_from_kernel_mode - Establish state before invoking an exception
+ * @regs:		Pointer to currents pt_regs
+ * @hardirq:		Whether to establish hardirq lockdep context before tracing
+ * @count_applied:	Whether HARDIRQ_OFFSET was staged in preempt_count()
  *
  * Invoked from architecture specific entry code with interrupts disabled.
  * Can only be called when the interrupt entry came from kernel mode. The
@@ -364,7 +419,9 @@ void irqentry_exit_cond_resched(void);
  *
  * Returns: An opaque object that must be passed to irqentry_exit_to_kernel_mode().
  */
-static __always_inline irqentry_state_t irqentry_enter_from_kernel_mode(struct pt_regs *regs)
+static __always_inline irqentry_state_t
+__irqentry_enter_from_kernel_mode(struct pt_regs *regs, bool hardirq,
+				  bool count_applied)
 {
 	irqentry_state_t ret = {
 		.exit_rcu = false,
@@ -401,10 +458,12 @@ static __always_inline irqentry_state_t irqentry_enter_from_kernel_mode(struct p
 		 * as in irqentry_enter_from_user_mode().
 		 */
 		lockdep_hardirqs_off(CALLER_ADDR0);
+		if (hardirq)
+			lockdep_hardirq_enter();
 		ct_irq_enter();
 		instrumentation_begin();
 		kmsan_unpoison_entry_regs(regs);
-		trace_hardirqs_off_finish();
+		irqentry_trace_hardirqs_off_finish(count_applied);
 		instrumentation_end();
 
 		ret.exit_rcu = true;
@@ -418,13 +477,21 @@ static __always_inline irqentry_state_t irqentry_enter_from_kernel_mode(struct p
 	 * in having another one here.
 	 */
 	lockdep_hardirqs_off(CALLER_ADDR0);
+	if (hardirq)
+		lockdep_hardirq_enter();
 	instrumentation_begin();
 	kmsan_unpoison_entry_regs(regs);
 	rcu_irq_enter_check_tick();
-	trace_hardirqs_off_finish();
+	irqentry_trace_hardirqs_off_finish(count_applied);
 	instrumentation_end();
 
 	return ret;
+}
+
+static __always_inline irqentry_state_t
+irqentry_enter_from_kernel_mode(struct pt_regs *regs)
+{
+	return __irqentry_enter_from_kernel_mode(regs, false, false);
 }
 
 /**

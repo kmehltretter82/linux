@@ -2370,9 +2370,12 @@ static inline void tracer_preempt_off(unsigned long a0, unsigned long a1) { }
 #ifdef CONFIG_IRQSOFF_TRACER
 void tracer_hardirqs_on(unsigned long a0, unsigned long a1);
 void tracer_hardirqs_off(unsigned long a0, unsigned long a1);
+void tracer_hardirqs_off_preempt_counted(unsigned long a0, unsigned long a1);
 #else
 static inline void tracer_hardirqs_on(unsigned long a0, unsigned long a1) { }
 static inline void tracer_hardirqs_off(unsigned long a0, unsigned long a1) { }
+static inline void
+tracer_hardirqs_off_preempt_counted(unsigned long a0, unsigned long a1) { }
 #endif
 
 /*

@@ -26,6 +26,36 @@ static __always_inline void rcu_irq_enter_check_tick(void)
 		__rcu_irq_enter_check_tick();
 }
 
+void irq_enter_rcu_preempt_counted(struct irqentry_hardirq_cookie cookie);
+bool irq_exit_rcu_preempt_counted_prepare(struct irqentry_hardirq_cookie cookie);
+
+/*
+ * Prepare every potentially instrumentable part of hardirq teardown before
+ * the raw count and lockdep updates. The caller must invoke the matching
+ * finish helper without passing through instrumentable code.
+ */
+static __always_inline bool
+irqentry_hardirq_exit_prepare(struct irqentry_hardirq_cookie cookie)
+{
+	bool do_sub;
+
+	/*
+	 * Preempt-on tracing can raise deferred work. The caller must perform
+	 * the final worker closure before conditionally removing an applied
+	 * raw hardirq count.
+	 */
+	do_sub = irqentry_hardirq_count_sub_prepare(cookie);
+	lockdep_hardirq_exit_prepare();
+	return do_sub;
+}
+
+static __always_inline void irqentry_hardirq_exit_finish(bool do_sub)
+{
+	if (do_sub)
+		__preempt_count_sub(HARDIRQ_OFFSET);
+	lockdep_hardirq_exit_finish();
+}
+
 /*
  * It is safe to do non-atomic ops on ->hardirq_context,
  * because NMI handlers may not preempt and the ops are

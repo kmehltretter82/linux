@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
 #include <linux/futex.h>
+#include <linux/hardirq.h>
 #include <linux/highmem.h>
 #include <linux/irq-entry-common.h>
 #include <linux/jump_label.h>
@@ -118,6 +119,44 @@ noinstr irqentry_state_t irqentry_enter(struct pt_regs *regs)
 	}
 
 	return irqentry_enter_from_kernel_mode(regs);
+}
+
+/**
+ * irqentry_hardirq_enter - Establish state for ordinary hardirq entry
+ * @regs: Pointer to the interrupted register state
+ *
+ * Attempt a staged raw hardirq-count addition before anything instrumentable
+ * can run and record whether it was applied. Then establish IRQ-disabled and
+ * hardirq lockdep state before context tracking or irqflag tracing can invoke
+ * callbacks. The caller must have distinguished an ordinary hardirq from
+ * NMI-like entry and must finish the staged attempt with
+ * irq_enter_rcu_preempt_counted().
+ *
+ * Returns: An opaque object for the matching irqentry exit operation.
+ */
+noinstr irqentry_state_t irqentry_hardirq_enter(struct pt_regs *regs)
+{
+	struct irqentry_hardirq_cookie cookie;
+	irqentry_state_t ret;
+	bool count_applied;
+
+	cookie = irqentry_hardirq_count_start();
+	count_applied = irqentry_hardirq_count_applied(cookie);
+
+	if (user_mode(regs)) {
+		ret = (irqentry_state_t) {
+			.exit_rcu = false,
+		};
+		irqentry_hardirq_count_state_set(&ret, cookie);
+
+		__enter_from_user_mode(regs, true, count_applied);
+		rseq_note_user_irq_entry();
+		return ret;
+	}
+
+	ret = __irqentry_enter_from_kernel_mode(regs, true, count_applied);
+	irqentry_hardirq_count_state_set(&ret, cookie);
+	return ret;
 }
 
 /**
